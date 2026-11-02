@@ -222,6 +222,13 @@ fn to_event(ev: &KEvent, names: &Names, cgroups: &mut CgroupIndex) -> Option<Eve
         _ => return None,
     };
     let mut out = Event::new(sev, "ebpf", k, msg);
+    if ev.kind == kind::CONNECT {
+        if let Some(ip) = dest_ip(ev) {
+            // mlab enriches public destinations by this key.
+            out.fields
+                .insert("dest".into(), SocketAddr::new(ip, ev.dport).to_string());
+        }
+    }
     out.guest = Some(watch::guest_ref(names, gk, vmid));
     out.fields.insert("pid".into(), ev.pid.to_string());
     out.fields.insert("uid".into(), ev.uid.to_string());

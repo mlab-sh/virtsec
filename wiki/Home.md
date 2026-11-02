@@ -39,7 +39,8 @@ vs-alpine-priv  Alpine Linux v3.22
 | | Status |
 | --- | --- |
 | **Proxmox VE 9.2** (Debian 13, kernel 7.0.2-pve) | Tested: `inventory`, `vulns`, `watch`, eBPF probe. |
-| Proxmox VE 7.x / 8.x | Expected to work (cgroup v2 layout unchanged since 7.0), not tested. |
+| Proxmox VE 8.x | Expected to work (same cgroup v2 layout), not tested. |
+| Proxmox VE 7.x | The packages need glibc 2.35+ (PVE 7 has 2.31): build from source. Not tested. |
 | LXC guests | Debian 12 and Alpine 3.22 tested, privileged and unprivileged. |
 | VM guests | Ubuntu 24.04 with qemu-guest-agent tested. Windows guests: OS info only. |
 | Clusters | One virtsec per node: it sees the guests running on its own node. |
@@ -51,6 +52,7 @@ vs-alpine-priv  Alpine Linux v3.22
 | [`inventory`](Inventory) | Packages of every guest and of the node, loaded / dormant, `--sbom` CycloneDX per guest. |
 | [`vulns`](Vulns) | Inventory + CVE matching, loaded and KEV first, filters for triage. |
 | [`watch`](Watch) | Live stream: exec / connect / file writes in guests, PVE journal, config changes. |
+| `serve` | As a tool of mlab-agent, everything above driven from an mlab workspace: [Tool API](Tool-API), [Deployment](Deployment). |
 
 ## Key concepts
 

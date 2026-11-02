@@ -11,25 +11,26 @@ mod pkgdb;
 #[cfg(all(feature = "ebpf", target_os = "linux"))]
 mod probe;
 mod procfs;
+mod protocol;
 mod purl;
 mod qga;
 mod reach;
 mod render;
 mod rootfs;
 mod sbom;
+mod serve;
+mod stream;
 mod vuln;
 mod watch;
 
-use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cache::Cache;
 use guest::GuestKind;
-use lang::LangLimits;
 use mlab::MlabClient;
 use model::Inventory;
 use render::Filter;
@@ -54,6 +55,8 @@ enum Command {
     },
     /// Vulnerabilities of every guest and of the node (vuln.mlab.sh).
     Vulns(VulnsArgs),
+    /// Run as an mlab-agent tool on stdin/stdout (the agent starts it).
+    Serve,
     /// Live stream: guest execs (and with eBPF connects, file writes), PVE logins and tasks, guest config changes.
     Watch(WatchArgs),
 }
@@ -169,6 +172,7 @@ async fn main() -> Result<()> {
                 }
             })
         }
+        Command::Serve => tokio::task::spawn_blocking(serve::serve).await?,
         Command::Watch(args) => tokio::task::spawn_blocking(move || run_watch(args)).await?,
         Command::Vulns(args) => {
             let client = MlabClient::new(&args.mlab_url, std::env::var("MLAB_API_KEY").ok())?;
@@ -194,49 +198,18 @@ async fn main() -> Result<()> {
 }
 
 fn collect(scope: &Scope) -> Result<Vec<Inventory>> {
-    procfs::check_root_access()?;
-    if !Path::new(&scope.pve).join("qemu-server").exists()
-        && !Path::new(&scope.pve).join("lxc").exists()
-    {
-        anyhow::bail!(
-            "{} has no guest configs: is this a Proxmox VE node?",
-            scope.pve.display()
-        );
-    }
-    let pids = guest::pids_by_guest();
-    let by_guest: HashMap<_, _> = pids
-        .iter()
-        .filter_map(|(g, p)| Some(((*g)?, p.clone())))
-        .collect();
     let kind = scope.kind.map(|k| match k {
         Kind::Lxc => GuestKind::Lxc,
         Kind::Vm => GuestKind::Qemu,
     });
-    let limits = LangLimits::default();
-    let mut invs: Vec<Inventory> = guest::discover(&scope.pve, &by_guest)
-        .into_iter()
-        .filter(|g| inventory::wanted(g, &scope.vmids, kind))
-        .map(|g| {
-            let p = by_guest
-                .get(&(g.kind, g.vmid))
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            match g.kind {
-                GuestKind::Lxc => inventory::scan_lxc(&g, p, &limits),
-                GuestKind::Qemu => inventory::scan_vm(&g, !p.is_empty(), scope.guest_exec),
-            }
-        })
-        .collect();
-    if !scope.no_host && scope.vmids.is_empty() && kind.is_none() {
-        // A VM's QEMU process sits in the VM's cgroup but runs the host's binaries.
-        let host: Vec<u32> = pids
-            .iter()
-            .filter(|(g, _)| g.is_none_or(|(k, _)| k == GuestKind::Qemu))
-            .flat_map(|(_, p)| p.iter().copied())
-            .collect();
-        invs.insert(0, inventory::host_inventory(&host, scope.match_kernel));
-    }
-    Ok(invs)
+    inventory::scan_node(&inventory::Scan {
+        pve: &scope.pve,
+        vmids: &scope.vmids,
+        kind,
+        guest_exec: scope.guest_exec,
+        host: !scope.no_host && scope.vmids.is_empty() && kind.is_none(),
+        match_kernel: scope.match_kernel,
+    })
 }
 
 fn run_watch(args: WatchArgs) -> Result<()> {

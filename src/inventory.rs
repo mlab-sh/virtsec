@@ -128,7 +128,7 @@ pub fn scan_vm(guest: &Guest, running: bool, exec: bool) -> Inventory {
         return empty(
             guest,
             os,
-            "packages not inspected: pass --guest-exec (runs read-only commands in the VM via qemu-guest-agent)".into(),
+            "packages not inspected: guest exec is off (--guest-exec, or guest_exec in mlab; runs read-only commands in the VM via qemu-guest-agent)".into(),
         );
     }
     if os.as_ref().is_some_and(|o| o.id == "mswindows") {
@@ -262,6 +262,60 @@ pub fn host_inventory(host_pids: &[u32], match_kernel: bool) -> Inventory {
         mapped_files: mapped.len(),
         warnings,
     }
+}
+
+/// What to inventory on this node.
+pub struct Scan<'a> {
+    /// Proxmox config directory (`/etc/pve`).
+    pub pve: &'a Path,
+    /// Only these guests; empty = all.
+    pub vmids: &'a [u32],
+    pub kind: Option<GuestKind>,
+    pub guest_exec: bool,
+    /// Include the node itself.
+    pub host: bool,
+    pub match_kernel: bool,
+}
+
+/// Every wanted guest of this node, then the node (first) when asked.
+pub fn scan_node(scan: &Scan) -> anyhow::Result<Vec<Inventory>> {
+    crate::procfs::check_root_access()?;
+    if !scan.pve.join("qemu-server").exists() && !scan.pve.join("lxc").exists() {
+        anyhow::bail!(
+            "{} has no guest configs: is this a Proxmox VE node?",
+            scan.pve.display()
+        );
+    }
+    let pids = crate::guest::pids_by_guest();
+    let by_guest: std::collections::HashMap<_, _> = pids
+        .iter()
+        .filter_map(|(g, p)| Some(((*g)?, p.clone())))
+        .collect();
+    let limits = LangLimits::default();
+    let mut invs: Vec<Inventory> = crate::guest::discover(scan.pve, &by_guest)
+        .into_iter()
+        .filter(|g| wanted(g, scan.vmids, scan.kind))
+        .map(|g| {
+            let p = by_guest
+                .get(&(g.kind, g.vmid))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            match g.kind {
+                GuestKind::Lxc => scan_lxc(&g, p, &limits),
+                GuestKind::Qemu => scan_vm(&g, !p.is_empty(), scan.guest_exec),
+            }
+        })
+        .collect();
+    if scan.host {
+        // A VM's QEMU process sits in the VM's cgroup but runs the host's binaries.
+        let host: Vec<u32> = pids
+            .iter()
+            .filter(|(g, _)| g.is_none_or(|(k, _)| k == GuestKind::Qemu))
+            .flat_map(|(_, p)| p.iter().copied())
+            .collect();
+        invs.insert(0, host_inventory(&host, scan.match_kernel));
+    }
+    Ok(invs)
 }
 
 /// A guest of `kind`, for the CLI's `--vmid` filter and the guest order.

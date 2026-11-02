@@ -59,7 +59,7 @@ $ virtsec inventory --vmid 3024
 cirsec-rel-ubu24  Ubuntu 24.04.5 LTS
   qemu 3024 running
   packages: 0 OS (0 loaded, 0 dormant), 0 language deps · 0 mapped files
-  ! packages not inspected: pass --guest-exec (runs read-only commands in the VM via qemu-guest-agent)
+  ! packages not inspected: guest exec is off (--guest-exec, or guest_exec in mlab; runs read-only commands in the VM via qemu-guest-agent)
 ```
 
 With `--guest-exec`, two commands run in the VM through `guest-exec`:

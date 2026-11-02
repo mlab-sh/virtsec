@@ -4,15 +4,18 @@
 
 ```text
 src/
-  main.rs       CLI (clap): inventory, vulns, watch
+  main.rs       CLI (clap): inventory, vulns, watch, serve
   guest.rs      guests from /etc/pve, config risks, cgroup → guest
   inventory.rs  LXC (live root), VM (guest agent), node (host + PVE CPEs)
   qga.rs        qemu-guest-agent client, hostile-archive unpacking
   watch.rs      event stream: proc connector exec, journal, config poll
   probe.rs      eBPF loader and attribution (feature `ebpf`)
+  serve.rs      `virtsec serve`: mlab-agent tool (ops, config clamp, inventory loop)
+  protocol.rs stream.rs   agent local protocol, numbered batches + backlog
   rootfs.rs pkgdb/ lang/ reach.rs procfs.rs os.rs purl.rs   inventory core
   vuln.rs mlab.rs cache.rs render.rs sbom.rs                matching and output
 crates/
+  virtsec-api/           the mlab-agent tool contract v1 (CBOR), imported by mlab
   virtsec-probe-common/  repr(C) event shared by kernel and userspace (no_std)
   virtsec-probe-ebpf/    the BPF programs (BPF target only, built by build.rs)
 ```

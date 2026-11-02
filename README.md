@@ -39,7 +39,51 @@ outputs from a test node:
 |---|---|
 | Commands | [inventory](https://github.com/mlab-sh/virtsec/wiki/Inventory) · [vulns](https://github.com/mlab-sh/virtsec/wiki/Vulns) · [watch](https://github.com/mlab-sh/virtsec/wiki/Watch) |
 | Details | [Guest risks](https://github.com/mlab-sh/virtsec/wiki/Guest-Risks) · [eBPF probe](https://github.com/mlab-sh/virtsec/wiki/eBPF-Probe) |
+| mlab | [Tool API (mlab-agent)](https://github.com/mlab-sh/virtsec/wiki/Tool-API) · [Deployment](https://github.com/mlab-sh/virtsec/wiki/Deployment) |
 | Operations | [Known limits](https://github.com/mlab-sh/virtsec/wiki/Known-Limits) · [Development](https://github.com/mlab-sh/virtsec/wiki/Development) |
+
+## Install
+
+Release builds include the eBPF probe and RPM support, for x86_64 Linux
+(glibc 2.35+: Proxmox VE 8 and 9).
+
+**apt** (Proxmox VE, Debian)
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://apt.mlab.sh/mlab.asc -o /etc/apt/keyrings/mlab.asc
+sudo tee /etc/apt/sources.list.d/mlab.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://apt.mlab.sh
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/mlab.asc
+EOF
+sudo apt update && sudo apt install virtsec
+```
+
+**dnf** (Fedora, RHEL and rebuilds)
+
+```bash
+sudo curl -fsSL https://pkg.mlab.sh/rpm/mlab.repo -o /etc/yum.repos.d/mlab.repo
+sudo dnf install virtsec
+```
+
+The signing key is the one every mlab package uses: fingerprint
+`717894BC C0E057E4 F9BBF3CA C0E287DD 9609A065`. The packages install
+`/usr/bin/virtsec`.
+
+**Prebuilt binary**: tarballs on the
+[releases page](https://github.com/mlab-sh/virtsec/releases), with a
+`SHA256SUMS` signed keyless by the release workflow:
+
+```bash
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/mlab-sh/virtsec/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 ## Build
 
