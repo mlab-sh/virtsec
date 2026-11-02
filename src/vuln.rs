@@ -414,7 +414,13 @@ fn join(img: &Inventory, by_purl: &HashMap<String, Vec<Finding>>, cached: bool) 
         if matchable(p).is_none() {
             unmatched += 1;
         }
-        for f in by_purl.get(&p.purl).into_iter().flatten() {
+        let fixed_here = |f: &&Finding| !p.backported.contains(&f.id);
+        for f in by_purl
+            .get(&p.purl)
+            .into_iter()
+            .flatten()
+            .filter(fixed_here)
+        {
             let mut f = f.clone();
             f.reachability = p.reachability;
             findings.push(f);

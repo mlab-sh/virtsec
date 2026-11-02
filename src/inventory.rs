@@ -329,10 +329,11 @@ pub fn host_inventory(host_pids: &[u32], match_kernel: bool) -> Inventory {
     let rootfs = Rootfs::new("/");
     let os = OsRelease::read(&rootfs);
     let mapped = Mapped::of_pids(host_pids);
-    let (mut packages, warnings, restart) = os_packages(&rootfs, os.as_ref(), &mapped);
+    let (mut packages, mut warnings, restart) = os_packages(&rootfs, os.as_ref(), &mapped);
 
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     let kernel_file = format!("/boot/vmlinuz-{}", release.trim());
+    let mut kernel_note = None;
     for p in packages.iter_mut().filter(|p| p.kind == PackageKind::Os) {
         if let Some((_, cpe)) = PVE_CPES.iter().find(|(n, _)| *n == p.name) {
             p.coordinate = Some(Coordinate::Cpe {
@@ -348,9 +349,21 @@ pub fn host_inventory(host_pids: &[u32], match_kernel: bool) -> Inventory {
             p.coordinate = match_kernel.then(|| Coordinate::Cpe {
                 cpe: format!("cpe:2.3:o:linux:linux_kernel:{upstream}:*:*:*:*:*:*:*"),
             });
+            if match_kernel {
+                let changelog = kernel_changelog(&p.name);
+                p.backported = changelog_cves(&changelog);
+                kernel_note = Some(format!(
+                    "kernel matched by its upstream version {upstream} (NVD CPE){}; the {} CVEs its changelog names as fixed are not reported, other backports are not known",
+                    ubuntu_base(&changelog)
+                        .map(|b| format!(", built from {b}"))
+                        .unwrap_or_default(),
+                    p.backported.len()
+                ));
+            }
         }
     }
 
+    warnings.extend(kernel_note);
     let hostname = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
     Inventory {
         name: format!("node {}", hostname.trim()),
@@ -363,6 +376,59 @@ pub fn host_inventory(host_pids: &[u32], match_kernel: bool) -> Inventory {
         restart,
         reboot: reboot_required(&rootfs).or_else(|| newer_kernel(release.trim())),
     }
+}
+
+/// The kernel package's changelog (`changelog.gz` for `-signed`, else
+/// `changelog.Debian.gz`), empty when unreadable.
+fn kernel_changelog(package: &str) -> String {
+    use std::io::Read;
+    let doc = Path::new("/usr/share/doc").join(package);
+    ["changelog.gz", "changelog.Debian.gz"]
+        .iter()
+        .find_map(|f| {
+            let gz = std::fs::File::open(doc.join(f)).ok()?;
+            let mut s = String::new();
+            flate2::read::GzDecoder::new(gz)
+                .take(16 << 20)
+                .read_to_string(&mut s)
+                .ok()?;
+            Some(s)
+        })
+        .unwrap_or_default()
+}
+
+/// Every `CVE-YYYY-N` the changelog names: PVE cherry-picks them.
+fn changelog_cves(changelog: &str) -> Vec<String> {
+    let mut out: Vec<String> = changelog
+        .match_indices("CVE-")
+        .filter_map(|(i, _)| {
+            let rest = &changelog[i + 4..];
+            let year = rest
+                .get(..4)
+                .filter(|y| y.bytes().all(|b| b.is_ascii_digit()))?;
+            let n: String = rest
+                .get(5..)?
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            (rest.as_bytes().get(4) == Some(&b'-') && n.len() >= 4)
+                .then(|| format!("CVE-{year}-{n}"))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The Ubuntu kernel the PVE kernel is built from: the latest
+/// `update sources to Ubuntu-7.0.0-18.18` entry.
+fn ubuntu_base(changelog: &str) -> Option<String> {
+    let at = changelog.find("sources to Ubuntu-")?;
+    let tag: String = changelog[at + "sources to ".len()..]
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != ',')
+        .collect();
+    Some(tag.trim_end_matches('.').to_string())
 }
 
 /// A kernel newer than the running one is installed (`/boot/vmlinuz-*`), and
@@ -456,6 +522,19 @@ mod tests {
         assert_eq!(upstream_version("1:6.0.5-1"), "6.0.5");
         assert_eq!(upstream_version("6.17.2-1-pve"), "6.17.2");
         assert_eq!(upstream_version("9.2.2"), "9.2.2");
+    }
+
+    #[test]
+    fn kernel_changelog_facts() {
+        let log = "proxmox-kernel-7.0 (7.0.2-3) trixie; urgency=medium\n\
+                   * cherry-pick fix for CVE-2026-31431 and CVE-2026-1234.\n\
+                   * update sources to Ubuntu-7.0.0-18.18 to avoid shipping...\n\
+                   * not one: CVE-26-1, CVE-2026-12\n\
+                   proxmox-kernel-7.0 (7.0.2-1)\n * update sources to Ubuntu-7.0.0-15.15\n\
+                   * again CVE-2026-31431\n";
+        assert_eq!(changelog_cves(log), ["CVE-2026-1234", "CVE-2026-31431"]);
+        assert_eq!(ubuntu_base(log).as_deref(), Some("Ubuntu-7.0.0-18.18"));
+        assert_eq!(ubuntu_base("nothing"), None);
     }
 
     #[test]

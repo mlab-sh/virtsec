@@ -112,6 +112,10 @@ pub struct Package {
     /// How to match it against vulns; `None` = ecosystem not covered.
     #[serde(skip)]
     pub coordinate: Option<Coordinate>,
+    /// CVEs its own changelog says are fixed (the PVE kernel's backports):
+    /// a CPE match on the upstream version doesn't know them.
+    #[serde(skip)]
+    pub backported: Vec<String>,
 }
 
 impl Package {
@@ -130,6 +134,7 @@ impl Package {
             },
             files: Vec::new(),
             coordinate: None,
+            backported: Vec::new(),
         }
     }
 }

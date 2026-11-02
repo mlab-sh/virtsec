@@ -23,8 +23,13 @@ What virtsec does **not** see yet.
 
 - **The PVE stack** is matched by upstream CPE; on the lab no finding came
   back for QEMU 11.0 / LXC 7.0, not yet established as "none exist".
-- **The kernel** only with `--match-kernel`: NVD knows nothing of PVE's
-  backports.
+- **The kernel** only with `--match-kernel`, by its upstream version against
+  NVD, which knows nothing of PVE's backports: on the lab, 6,109 CVEs for
+  `7.0.2-6-pve`, nearly all 2026 kernel-CNA ones without a fixed version. The
+  CVEs the kernel's own changelog names as fixed are dropped (8 there, none of
+  them among the matches) and the node says which Ubuntu kernel it is built
+  from (`Ubuntu-7.0.0-18.18`). Matching that Ubuntu source instead would know
+  the backports, but vuln.mlab.sh times out (504) on Ubuntu's `linux` today.
 - **API limits.** A full node without `$MLAB_API_KEY` can hit the anonymous
   rate limit; an unavailable API leaves the inventory, flagged per guest.
 
