@@ -160,7 +160,7 @@ pub fn risks(kind: GuestKind, config: &[(String, String)]) -> Vec<String> {
             }
             for f in get("features").into_iter().flat_map(|f| f.split(',')) {
                 match f.split_once('=') {
-                    Some((name @ ("nesting" | "keyctl" | "fuse"), "1")) => {
+                    Some((name @ ("nesting" | "keyctl" | "fuse" | "mknod"), "1")) => {
                         out.push(name.to_string())
                     }
                     Some(("mount", fs)) => out.push(format!("mount={fs}")),
@@ -203,6 +203,16 @@ pub fn risks(kind: GuestKind, config: &[(String, String)]) -> Vec<String> {
                 if !v.starts_with("spice") {
                     out.push(format!("{k} USB passthrough"));
                 }
+            }
+            for (k, v) in numbered("virtiofs") {
+                let dir = v
+                    .split(',')
+                    .find_map(|o| o.strip_prefix("dirid="))
+                    .unwrap_or(v.split(',').next().unwrap_or(""));
+                out.push(format!("{k} host directory {dir} shared (virtiofs)"));
+            }
+            if get("ivshmem").is_some() {
+                out.push("ivshmem shared memory with the host".to_string());
             }
             for (k, v) in numbered("serial").chain(numbered("parallel")) {
                 if v.starts_with("/dev/") {
@@ -280,7 +290,7 @@ mod tests {
     #[test]
     fn lxc_risks() {
         let cfg = parse_config(
-            "#my description: with colon\narch: amd64\nfeatures: nesting=1,mount=nfs\n\
+            "#my description: with colon\narch: amd64\nfeatures: nesting=1,mount=nfs,mknod=1\n\
              hostname: vs-alpine-priv\nmp0: /var/log,mp=/mnt/hostlog,ro=1\n\
              mp1: local-lvm:vm-4002-disk-1,mp=/data\ndev0: /dev/kvm,gid=104\n\
              lxc.apparmor.profile: unconfined\nlxc.cgroup2.devices.allow: a\n\
@@ -293,6 +303,7 @@ mod tests {
                 "privileged",
                 "nesting",
                 "mount=nfs",
+                "mknod",
                 "mp0 host bind mount /var/log (ro)",
                 "dev0 host device /dev/kvm",
                 "apparmor unconfined",
@@ -320,6 +331,7 @@ mod tests {
     fn qemu_risks() {
         let cfg = parse_config(
             "args: -cpu host\nhostpci0: 0000:01:00.0\nusb0: spice\nusb1: host=1-2\n\
+             virtiofs0: dirid=share,cache=auto\nivshmem: size=32,name=lg\n\
              serial0: socket\nhookscript: local:snippets/hook.pl\nscsi0: local-lvm:vm-1-disk-0\n",
         );
         assert_eq!(
@@ -328,6 +340,8 @@ mod tests {
                 "raw QEMU args",
                 "hostpci0 PCI passthrough",
                 "usb1 USB passthrough",
+                "virtiofs0 host directory share shared (virtiofs)",
+                "ivshmem shared memory with the host",
                 "hookscript local:snippets/hook.pl",
             ]
         );

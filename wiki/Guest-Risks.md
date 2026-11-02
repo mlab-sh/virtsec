@@ -1,5 +1,8 @@
 # Guest risks
 
+[`audit`](Audit#checks) grades each risk (critical, warning, info); the guest
+firewall is checked there too (`firewall.guest`).
+
 Read from each guest's current config (`/etc/pve/lxc/<vmid>.conf`,
 `/etc/pve/qemu-server/<vmid>.conf`), snapshot sections excluded. Shown on the
 guest line of [`inventory`](Inventory) / [`vulns`](Vulns) and in `guest.risks`
@@ -13,6 +16,7 @@ in JSON; [`watch`](Watch) reports every risk added or removed.
 | `features: nesting=1` | `nesting` | Exposes `/proc` and `/sys` more, needed for Docker or systemd in the container. |
 | `features: keyctl=1` | `keyctl` | The container uses the kernel keyring. |
 | `features: fuse=1` | `fuse` | FUSE device in the container. |
+| `features: mknod=1` | `mknod` | The container may create device nodes (still filtered by its device cgroup). |
 | `features: mount=nfs;cifs` | `mount=nfs;cifs` | The container may mount those filesystems itself. |
 | `mpN: /host/path,...` | `mpN host bind mount /host/path` (`(ro)` if read-only) | A host directory inside the guest. Storage volumes (`storage:vol`) are not flagged. |
 | `devN: /dev/...` | `devN host device /dev/...` | Host device passthrough. |
@@ -28,6 +32,8 @@ in JSON; [`watch`](Watch) reports every risk added or removed.
 | `hostpciN:` | `hostpciN PCI passthrough` | The guest drives a host PCI device (DMA). |
 | `usbN:` (not `spice`) | `usbN USB passthrough` | Host USB device. |
 | `serialN:` / `parallelN:` on `/dev/...` | `serialN host device /dev/...` | Host character device. |
+| `virtiofsN: dirid=<mapping>` | `virtiofsN host directory <mapping> shared (virtiofs)` | A host directory (cluster directory mapping) mounted in the VM. |
+| `ivshmem:` | `ivshmem shared memory with the host` | A memory region shared with host processes (Looking Glass, ...). |
 
 ## Both
 

@@ -862,6 +862,7 @@ pub fn risk_severity(kind: GuestKind, risk: &str, all: &[String]) -> Severity {
     let risk = risk.trim_end_matches(" (pending restart)");
     let privileged = kind == GuestKind::Lxc && all.iter().any(|r| r.starts_with("privileged"));
     let way_out = risk == "nesting"
+        || risk == "mknod"
         || risk == "apparmor unconfined"
         || risk == "no capabilities dropped"
         || (risk.contains("host bind mount") && !risk.ends_with("(ro)"));
@@ -873,6 +874,7 @@ pub fn risk_severity(kind: GuestKind, risk: &str, all: &[String]) -> Severity {
         || risk.starts_with("hookscript")
         || risk.contains("host device")
         || risk.contains("passthrough")
+        || risk.contains("shared")
     {
         Severity::Warning
     } else {
