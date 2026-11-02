@@ -153,6 +153,12 @@ struct VulnsArgs {
     /// Only vulns in CISA / EU KEV (known exploited).
     #[arg(long)]
     kev_only: bool,
+    /// Only vulns the previous run did not report (each run saves the baseline).
+    #[arg(long)]
+    new: bool,
+    /// Exit with status 3 when a shown vuln is at or above this severity.
+    #[arg(long, value_enum, value_name = "SEVERITY")]
+    fail_on: Option<VulnSeverity>,
 }
 
 #[tokio::main]
@@ -212,7 +218,18 @@ async fn main() -> Result<()> {
             let (invs, args) =
                 tokio::task::spawn_blocking(move || collect(&args.scope).map(|i| (i, args)))
                     .await??;
-            let vulns = vuln::match_images(&client, &cache, &invs).await;
+            let mut vulns = vuln::match_images(&client, &cache, &invs).await;
+            let baseline = cache.last_seen();
+            let seen = vuln::seen(&invs, &vulns, baseline.as_ref());
+            if args.new {
+                if baseline.is_none() {
+                    eprintln!("virtsec: no previous run on this node: every vuln is new");
+                }
+                vuln::keep_new(&invs, &mut vulns, baseline.as_ref());
+            }
+            // Only a complete run replaces the baseline (by guest: a failed
+            // one keeps its previous findings).
+            cache.save_seen(&seen);
             let results: Vec<_> = invs.iter().zip(vulns.iter()).collect();
             let filter = Filter {
                 min_severity: args.min_severity,
@@ -224,7 +241,17 @@ async fn main() -> Result<()> {
                 Output::Json => {
                     serde_json::to_string_pretty(&render::vulns_json(&results, &filter))? + "\n"
                 }
-            })
+            })?;
+            if let Some(min) = args.fail_on {
+                let hit = results
+                    .iter()
+                    .flat_map(|(_, v)| &v.findings)
+                    .any(|f| filter.keeps(f) && f.severity >= min);
+                if hit {
+                    std::process::exit(3);
+                }
+            }
+            Ok(())
         }
     }
 }

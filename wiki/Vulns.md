@@ -48,6 +48,14 @@ package and installed version, fixed version when the distro has one.
 | `--min-severity` | `unknown`, `low`, `medium`, `high`, `critical`. |
 | `--mlab-url` | Another vuln.mlab.sh (on-prem mlab). `$MLAB_API_KEY` raises the rate limit. |
 | `--no-cache` | Ignore cached results (`$XDG_CACHE_HOME/virtsec`, else `~/.cache/virtsec`). |
+| `--new` | Only vulns the previous run did not report. Every run saves its findings per guest as the baseline (`last-seen.json` in the cache dir); a guest whose matching failed or was incomplete keeps its previous baseline, so an API outage doesn't make everything "new" next time. |
+| `--fail-on SEVERITY` | Exit with status **3** when a shown vuln (after the other filters) is at or above `SEVERITY`: `--only-loaded --kev-only --fail-on low` fails on any loaded known-exploited CVE. |
+
+For a daily cron that mails only what changed:
+
+```bash
+virtsec vulns --new --only-loaded --min-severity high
+```
 
 Guests have no image digest, so results are not cached per guest; only shared
 data (the KEV catalogue) is.

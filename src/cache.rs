@@ -99,6 +99,30 @@ impl Cache {
     }
 }
 
+/// Findings seen by the previous `vulns` run, `<id> <purl>` per guest key:
+/// the baseline of `--new`. Kept apart from the TTL'd entries: it never expires.
+pub type Seen = HashMap<String, std::collections::BTreeSet<String>>;
+
+impl Cache {
+    pub fn last_seen(&self) -> Option<Seen> {
+        let path = self.dir.as_ref()?.join("last-seen.json");
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    }
+
+    /// Replace the baseline with `seen` (best effort, like every cache write).
+    pub fn save_seen(&self, seen: &Seen) {
+        let Some(dir) = &self.dir else { return };
+        let path = dir.join("last-seen.json");
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        let res = std::fs::create_dir_all(dir)
+            .and_then(|_| std::fs::write(&tmp, serde_json::to_vec(seen)?))
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = res {
+            tracing::debug!(error = %e, "cannot write the vulns baseline");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +146,14 @@ mod tests {
         assert!(expired.get("https://vuln.mlab.sh", "sha256:abc").is_none());
         let no_read = Cache::new(Some(dir.path().into()), Duration::from_secs(60), false);
         assert!(no_read.get("https://vuln.mlab.sh", "sha256:abc").is_none());
+
+        assert!(no_read.last_seen().is_none());
+        let seen = Seen::from([("4001".to_string(), ["CVE-1 pkg:x".to_string()].into())]);
+        no_read.save_seen(&seen);
+        assert_eq!(
+            expired.last_seen(),
+            Some(seen),
+            "no TTL, read even with --no-cache"
+        );
     }
 }

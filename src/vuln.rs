@@ -429,6 +429,43 @@ fn join(img: &Inventory, by_purl: &HashMap<String, Vec<Finding>>, cached: bool) 
     }
 }
 
+/// The baseline key of an inventory: its vmid, or `node`.
+fn seen_key(inv: &Inventory) -> String {
+    inv.guest
+        .as_ref()
+        .map_or("node".to_string(), |g| g.vmid.to_string())
+}
+
+fn seen_id(f: &Finding) -> String {
+    format!("{} {}", f.id, f.purl)
+}
+
+/// This run's findings as the next baseline. A guest whose matching failed
+/// keeps what `prev` had for it, so an API outage doesn't make all "new".
+pub fn seen(
+    invs: &[Inventory],
+    vulns: &[Vulns],
+    prev: Option<&crate::cache::Seen>,
+) -> crate::cache::Seen {
+    let mut out = prev.cloned().unwrap_or_default();
+    for (inv, v) in invs.iter().zip(vulns) {
+        if v.error.is_none() && v.unscanned == 0 {
+            out.insert(seen_key(inv), v.findings.iter().map(seen_id).collect());
+        }
+    }
+    out
+}
+
+/// Drop the findings `prev` already had (`--new`). Without a baseline all are new.
+pub fn keep_new(invs: &[Inventory], vulns: &mut [Vulns], prev: Option<&crate::cache::Seen>) {
+    let Some(prev) = prev else { return };
+    for (inv, v) in invs.iter().zip(vulns.iter_mut()) {
+        if let Some(old) = prev.get(&seen_key(inv)) {
+            v.findings.retain(|f| !old.contains(&seen_id(f)));
+        }
+    }
+}
+
 /// Group a package's advisories by CVE (several feeds describe the same one).
 pub fn findings_for(
     pkg: &crate::model::Package,
@@ -758,6 +795,51 @@ mod tests {
                 ..Default::default()
             }))
         }
+    }
+
+    #[test]
+    fn new_findings_against_the_baseline() {
+        let f = |id: &str| Finding {
+            id: id.into(),
+            advisories: vec![],
+            package: "openssl".into(),
+            version: "3".into(),
+            purl: "pkg:deb/debian/openssl@3".into(),
+            severity: VulnSeverity::High,
+            cvss: None,
+            kev: None,
+            fixed: None,
+            summary: String::new(),
+            reachability: Reachability::Loaded,
+        };
+        let invs = [image("a")];
+        let mut first = vec![Vulns {
+            findings: vec![f("CVE-1")],
+            ..Default::default()
+        }];
+        let base = seen(&invs, &first, None);
+        assert_eq!(base["node"].len(), 1);
+        keep_new(&invs, &mut first, None);
+        assert_eq!(first[0].findings.len(), 1, "no baseline: all new");
+
+        let invs = &invs[..];
+        let mut next = vec![Vulns {
+            findings: vec![f("CVE-1"), f("CVE-2")],
+            ..Default::default()
+        }];
+        keep_new(invs, &mut next, Some(&base));
+        assert_eq!(next[0].findings.len(), 1);
+        assert_eq!(next[0].findings[0].id, "CVE-2");
+
+        let failed = vec![Vulns {
+            error: Some("down".into()),
+            ..Default::default()
+        }];
+        assert_eq!(
+            seen(invs, &failed, Some(&base)),
+            base,
+            "a failed run keeps the baseline"
+        );
     }
 
     fn image(digest: &str) -> Inventory {
