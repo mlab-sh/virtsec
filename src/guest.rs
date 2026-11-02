@@ -227,6 +227,76 @@ pub fn risks(kind: GuestKind, config: &[(String, String)]) -> Vec<String> {
     out
 }
 
+/// One `storage.cfg` entry: what the inventory and the audit need of it.
+#[derive(Debug, Default)]
+pub struct Storage {
+    /// `dir`, `zfspool`, `lvmthin`, `pbs`, `nfs`, ...
+    pub kind: String,
+    pub path: Option<String>,
+    pub shared: bool,
+    /// ZFS dataset (`rpool/data`) and where it is mounted, if not `/<pool>`.
+    pub pool: Option<String>,
+    pub mountpoint: Option<String>,
+}
+
+/// `storage.cfg`: `<type>: <name>` then tab-indented `key value` lines.
+pub fn parse_storages(content: &str) -> HashMap<String, Storage> {
+    let mut out = HashMap::new();
+    let mut current: Option<String> = None;
+    for line in content.lines() {
+        if !line.starts_with([' ', '\t']) {
+            current = line.split_once(':').map(|(kind, name)| {
+                let name = name.trim().to_string();
+                out.insert(
+                    name.clone(),
+                    Storage {
+                        kind: kind.trim().to_string(),
+                        ..Default::default()
+                    },
+                );
+                name
+            });
+        } else if let Some(st) = current.as_ref().and_then(|n| out.get_mut(n)) {
+            let (k, v) = line
+                .trim()
+                .split_once(char::is_whitespace)
+                .unwrap_or((line.trim(), ""));
+            let v = v.trim().to_string();
+            match k {
+                "path" => st.path = Some(v),
+                "shared" => st.shared = v == "1",
+                "pool" => st.pool = Some(v),
+                "mountpoint" => st.mountpoint = Some(v),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// The host directory holding a container's root, when its volume is a plain
+/// directory (ZFS subvolume, `dir` storage created with size 0). Block
+/// volumes (LVM, raw images, Ceph) would need a mount: `None`.
+pub fn rootfs_dir(rootfs: &str, storages: &HashMap<String, Storage>) -> Option<std::path::PathBuf> {
+    let volume = rootfs.split(',').next()?;
+    let (storage, vol) = volume.split_once(':')?;
+    let st = storages.get(storage)?;
+    let dir = match st.kind.as_str() {
+        "zfspool" if vol.starts_with("subvol-") => {
+            let base = st
+                .mountpoint
+                .clone()
+                .or_else(|| st.pool.as_ref().map(|p| format!("/{p}")))?;
+            Path::new(&base).join(vol)
+        }
+        "dir" | "nfs" | "cifs" | "cephfs" if vol.ends_with(".subvol") => {
+            Path::new(st.path.as_ref()?).join("images").join(vol)
+        }
+        _ => return None,
+    };
+    dir.is_dir().then_some(dir)
+}
+
 /// The guest a cgroup v2 path belongs to (`/lxc/4001/ns/init.scope`, `/qemu.slice/150.scope`).
 pub fn guest_of_cgroup(path: &str) -> Option<(GuestKind, u32)> {
     if let Some(rest) = path.strip_prefix("/lxc/") {
@@ -285,6 +355,38 @@ mod tests {
         );
         assert_eq!(guest_of_cgroup("/lxc.monitor/4001"), None);
         assert_eq!(guest_of_cgroup("/system.slice/pveproxy.service"), None);
+    }
+
+    #[test]
+    fn rootfs_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path().display();
+        std::fs::create_dir_all(tmp.path().join("images/4003/subvol-4003-disk-0.subvol")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("zfs/subvol-4004-disk-0")).unwrap();
+        let st = parse_storages(&format!(
+            "dir: local\n\tpath {t}\n\tcontent rootdir\n\n\
+             zfspool: local-zfs\n\tpool rpool/data\n\tmountpoint {t}/zfs\n\tsparse 1\n\n\
+             lvmthin: local-lvm\n\tthinpool data\n\tvgname pve\n"
+        ));
+        assert_eq!(st["local-zfs"].pool.as_deref(), Some("rpool/data"));
+        assert_eq!(
+            rootfs_dir("local:4003/subvol-4003-disk-0.subvol,size=0T", &st),
+            Some(tmp.path().join("images/4003/subvol-4003-disk-0.subvol"))
+        );
+        assert_eq!(
+            rootfs_dir("local-zfs:subvol-4004-disk-0,size=8G", &st),
+            Some(tmp.path().join("zfs/subvol-4004-disk-0"))
+        );
+        assert_eq!(rootfs_dir("local-lvm:vm-4001-disk-0,size=3G", &st), None);
+        assert_eq!(
+            rootfs_dir("local:4005/vm-4005-disk-0.raw,size=4G", &st),
+            None
+        );
+        assert_eq!(
+            rootfs_dir("local-zfs:subvol-9-disk-0", &st),
+            None,
+            "missing dir"
+        );
     }
 
     #[test]

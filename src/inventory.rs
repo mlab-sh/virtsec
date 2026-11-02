@@ -164,6 +164,45 @@ pub fn scan_lxc(guest: &Guest, pids: &[u32], limits: &LangLimits) -> Inventory {
     }
 }
 
+/// A stopped container (or template) whose root is a plain directory on the
+/// host: its packages and lockfiles, read offline, all dormant. Resolution
+/// stays in that root, as for a running one.
+pub fn scan_stopped_lxc(
+    guest: &Guest,
+    storages: &std::collections::HashMap<String, crate::guest::Storage>,
+    limits: &LangLimits,
+) -> Inventory {
+    let Some(dir) = guest
+        .get("rootfs")
+        .and_then(|r| crate::guest::rootfs_dir(r, storages))
+    else {
+        return empty(
+            guest,
+            None,
+            format!(
+                "{}: not inspected (block volume, would need a mount)",
+                guest.status
+            ),
+        );
+    };
+    let rootfs = Rootfs::new(dir);
+    let os = OsRelease::read(&rootfs);
+    let (mut packages, mut warnings, _) = os_packages(&rootfs, os.as_ref(), &Mapped::default());
+    packages.extend(lang::scan(&rootfs, &[], limits));
+    warnings.push(format!(
+        "{}: read from its root on disk, nothing runs (every package dormant)",
+        guest.status
+    ));
+    Inventory {
+        name: guest.name.clone(),
+        os,
+        guest: Some(guest.clone()),
+        packages,
+        warnings,
+        ..Default::default()
+    }
+}
+
 /// Files mapped by every process of the guest, one canonical path per line.
 const MAPS_SCRIPT: &str = r#"for m in /proc/[0-9]*/maps; do cat "$m" 2>/dev/null; done |
 awk '{ p = $0; if (sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +/, "", p) && p ~ /^\//) print p }' | sort -u"#;
@@ -481,6 +520,9 @@ pub fn scan_node(scan: &Scan) -> anyhow::Result<Vec<Inventory>> {
         .filter_map(|(g, p)| Some(((*g)?, p.clone())))
         .collect();
     let limits = LangLimits::default();
+    let storages = std::fs::read_to_string(scan.pve.join("storage.cfg"))
+        .map(|c| crate::guest::parse_storages(&c))
+        .unwrap_or_default();
     let mut invs: Vec<Inventory> = crate::guest::discover(scan.pve, &by_guest)
         .into_iter()
         .filter(|g| wanted(g, scan.vmids, scan.kind))
@@ -490,6 +532,7 @@ pub fn scan_node(scan: &Scan) -> anyhow::Result<Vec<Inventory>> {
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             match g.kind {
+                GuestKind::Lxc if p.is_empty() => scan_stopped_lxc(&g, &storages, &limits),
                 GuestKind::Lxc => scan_lxc(&g, p, &limits),
                 GuestKind::Qemu => scan_vm(&g, !p.is_empty(), scan.guest_exec),
             }

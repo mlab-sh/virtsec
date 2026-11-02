@@ -4,8 +4,11 @@ What virtsec does **not** see yet.
 
 ## Inventory
 
-- **Stopped guests are not inspected.** Inspecting them would mean mounting
-  their disks; only their [risks](Guest-Risks) are shown.
+- **Stopped guests on block volumes are not inspected.** A stopped container
+  or template whose root is a directory (ZFS subvolume, `dir` storage created
+  with size 0) is read in place; on LVM, raw images or Ceph it would need a
+  mount, and stopped VMs a disk mount too: only their
+  [risks](Guest-Risks) are shown.
 - **VMs need the guest agent** and `--guest-exec`. No agent: OS unknown, no
   packages. Windows: OS info only. Language dependencies are never inspected
   in VMs.

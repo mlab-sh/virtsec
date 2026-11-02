@@ -34,7 +34,17 @@ cirsec-tpl-deb12
 
 The pretty output lists at most 12 loaded packages per guest; `-o json` has
 them all. Stopped guests and templates take one line: their
-[risks](Guest-Risks) are read from the config, nothing else is inspected.
+[risks](Guest-Risks) are read from the config. A stopped **container** whose
+root is a plain directory on the host (ZFS `subvol-*`, a `dir` storage volume
+created with size 0) is read in place, packages and lockfiles, every package
+dormant; nothing is mounted:
+
+```text
+vs-stopped  Alpine Linux v3.22
+  lxc 4003 stopped
+  packages: 32 OS (0 loaded, 32 dormant), 0 language deps · 0 mapped files
+  ! stopped: read from its root on disk, nothing runs (every package dormant)
+```
 
 ## Restart and reboot needed
 

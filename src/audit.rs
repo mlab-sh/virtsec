@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 use owo_colors::OwoColorize;
 use serde::Serialize;
 
-use crate::guest::{Guest, GuestKind};
+use crate::guest::{self, Guest, GuestKind};
 use crate::model::Inventory;
 use crate::watch::{GuestRef, Severity};
 
@@ -664,41 +664,6 @@ fn parse_pools(user_cfg: &str) -> HashMap<String, Vec<u32>> {
         .collect()
 }
 
-#[derive(Debug, Default)]
-struct Storage {
-    kind: String,
-    path: Option<String>,
-    shared: bool,
-}
-
-/// `storage.cfg`: `<type>: <name>` then tab-indented `key value` lines.
-fn parse_storages(content: &str) -> HashMap<String, Storage> {
-    let mut out = HashMap::new();
-    let mut current: Option<String> = None;
-    for line in content.lines() {
-        if !line.starts_with([' ', '\t']) {
-            current = line.split_once(':').map(|(kind, name)| {
-                let name = name.trim().to_string();
-                out.insert(
-                    name.clone(),
-                    Storage {
-                        kind: kind.trim().to_string(),
-                        ..Default::default()
-                    },
-                );
-                name
-            });
-        } else if let Some(st) = current.as_ref().and_then(|n| out.get_mut(n)) {
-            match line.trim().split_once(char::is_whitespace) {
-                Some(("path", v)) => st.path = Some(v.trim().to_string()),
-                Some(("shared", v)) => st.shared = v.trim() == "1",
-                _ => {}
-            }
-        }
-    }
-    out
-}
-
 /// Newest `vzdump-<lxc|qemu>-<vmid>-*` per vmid in a storage's `dump/` dir.
 fn newest_dumps(dir: &Path) -> HashMap<u32, SystemTime> {
     let mut out: HashMap<u32, SystemTime> = HashMap::new();
@@ -738,7 +703,7 @@ fn backups(pve: &Path, node: &str, guests: &[&Guest], now: SystemTime) -> Vec<Ch
         .map(|c| parse_pools(&c))
         .unwrap_or_default();
     let storages = read(&pve.join("storage.cfg"))
-        .map(|c| parse_storages(&c))
+        .map(|c| guest::parse_storages(&c))
         .unwrap_or_default();
     let mut out = Vec::new();
     let jobs: Vec<&Job> = jobs
@@ -948,7 +913,6 @@ mod tests {
     use super::*;
 
     fn guest(vmid: u32, cfg: &str) -> Guest {
-        use crate::guest;
         let config = guest::parse_config(cfg);
         Guest {
             kind: GuestKind::Lxc,

@@ -131,7 +131,7 @@ pub fn inventory_pretty(invs: &[Inventory], color: bool) -> String {
         if let Some(g) = guest_line(inv, color) {
             let _ = writeln!(out, "  {g}");
         }
-        if inv.guest.as_ref().is_some_and(|g| g.status != "running") {
+        if inv.packages.is_empty() && inv.guest.as_ref().is_some_and(|g| g.status != "running") {
             continue; // nothing inspected: the config risks are all there is
         }
         let _ = writeln!(
@@ -245,7 +245,7 @@ pub fn vulns_pretty(results: &[(&Inventory, &Vulns)], filter: &Filter, color: bo
         if let Some(g) = guest_line(inv, color) {
             let _ = writeln!(out, "  {g}");
         }
-        if inv.guest.as_ref().is_some_and(|g| g.status != "running") {
+        if inv.packages.is_empty() && inv.guest.as_ref().is_some_and(|g| g.status != "running") {
             continue; // nothing inspected: the config risks are all there is
         }
         let _ = writeln!(
