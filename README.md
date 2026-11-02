@@ -34,6 +34,32 @@ virtsec vulns --vmid 4001 -o json
 Stopped guests are listed with their config risks, not inspected (nothing is
 mounted or started).
 
+## watch
+
+One live stream, pretty or NDJSON (`-o json`):
+
+- **exec**: every program started in a guest, from the kernel's proc connector,
+  attributed by cgroup. In an LXC each exec is reported (`WARN` when run from
+  `/tmp`, `/dev/shm`, `/var/tmp` or deleted); LXC's own start hooks are not.
+  In a VM's QEMU cgroup only QEMU and PVE's tap scripts may run: anything else
+  is `CRIT`, a possible VM escape.
+- **pve**: API logins and authentication failures, PVE tasks, SSH logins and
+  failures, from the journal of pvedaemon / pveproxy / sshd.
+- **config**: guests created, removed, started, stopped; isolation risks added
+  or removed, including changes waiting in `[pve:pending]` for the next start.
+
+```text
+$ virtsec watch --min-severity warning
+16:11:37  WARN  config  lxc/4001 vs-deb12  risk added: mp0 host bind mount /var/tmp
+16:13:23  WARN  exec    lxc/4001 vs-deb12  /dev/shm/y  /dev/shm/y
+16:13:35  WARN  pve     API authentication failure for nosuchuser@pve from ::ffff:127.0.0.1
+16:13:37  CRIT  exec    qemu/3024 cirsec-rel-ubu24  program run in the VM's QEMU cgroup (possible VM escape): /usr/bin/true  /bin/true
+```
+
+Known limits: a process that exits before virtsec reads `/proc/<pid>` can't
+be attributed and is dropped (eBPF would fix it); no outbound connections or
+file writes yet; a guest booting floods `info` with its init's execs.
+
 ## Build
 
 ```bash

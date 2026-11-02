@@ -79,7 +79,14 @@ pub fn discover(pve: &Path, pids: &HashMap<(GuestKind, u32), Vec<u32>>) -> Vec<G
                 .find(|(k, _)| k == name_key)
                 .map(|(_, v)| v.clone())
                 .unwrap_or_else(|| format!("{}-{vmid}", kind.as_str()));
-            let risks = risks(kind, &config);
+            let mut risks = risks(kind, &config);
+            // Changes made while the guest runs wait in `[pve:pending]` until its next start.
+            let pending = with_pending(&config, &content);
+            for r in self::risks(kind, &pending) {
+                if !risks.contains(&r) {
+                    risks.push(format!("{r} (pending restart)"));
+                }
+            }
             guests.push(Guest {
                 kind,
                 vmid,
@@ -109,6 +116,26 @@ pub fn parse_config(content: &str) -> Vec<(String, String)> {
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect()
+}
+
+/// `config` with the `[pve:pending]` section applied (`delete: a,b` removes keys).
+pub fn with_pending(config: &[(String, String)], content: &str) -> Vec<(String, String)> {
+    let Some((_, rest)) = content.split_once("\n[pve:pending]\n") else {
+        return config.to_vec();
+    };
+    let pending = parse_config(rest);
+    let deleted: Vec<&str> = pending
+        .iter()
+        .filter(|(k, _)| k == "delete")
+        .flat_map(|(_, v)| v.split(','))
+        .collect();
+    let mut out: Vec<(String, String)> = config
+        .iter()
+        .filter(|(k, _)| !deleted.contains(&k.as_str()) && !pending.iter().any(|(p, _)| p == k))
+        .cloned()
+        .collect();
+    out.extend(pending.into_iter().filter(|(k, _)| k != "delete"));
+    out
 }
 
 /// What in a guest's config weakens its isolation from the host.
@@ -273,6 +300,20 @@ mod tests {
             ]
         );
         assert!(risks(GuestKind::Lxc, &parse_config("unprivileged: 1\n")).is_empty());
+    }
+
+    #[test]
+    fn pending_changes() {
+        let content = "unprivileged: 1\nfeatures: keyctl=1\nmp0: /srv,mp=/srv\n\
+                       [pve:pending]\nfeatures: nesting=1\ndelete: mp0\n[clean]\nunprivileged: 0\n";
+        let cfg = parse_config(content);
+        let pending = with_pending(&cfg, content);
+        assert_eq!(
+            risks(GuestKind::Lxc, &cfg),
+            vec!["keyctl", "mp0 host bind mount /srv"]
+        );
+        assert_eq!(risks(GuestKind::Lxc, &pending), vec!["nesting"]);
+        assert_eq!(with_pending(&cfg, "unprivileged: 1\n"), cfg);
     }
 
     #[test]

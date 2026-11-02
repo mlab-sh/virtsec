@@ -1567,6 +1567,7 @@ dependencies = [
  "clap",
  "flate2",
  "futures",
+ "libc",
  "owo-colors",
  "reqwest",
  "rusqlite",

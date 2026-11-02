@@ -16,6 +16,7 @@ mod render;
 mod rootfs;
 mod sbom;
 mod vuln;
+mod watch;
 
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
@@ -51,6 +52,35 @@ enum Command {
     },
     /// Vulnerabilities of every guest and of the node (vuln.mlab.sh).
     Vulns(VulnsArgs),
+    /// Live stream: execs in guests, PVE logins and tasks, guest config changes.
+    Watch(WatchArgs),
+}
+
+#[derive(Args)]
+struct WatchArgs {
+    /// No exec events (proc connector).
+    #[arg(long)]
+    no_exec: bool,
+    /// No pvedaemon / pveproxy / sshd journal events.
+    #[arg(long)]
+    no_journal: bool,
+    /// Hide events below this severity.
+    #[arg(long, value_enum, default_value_t = MinSeverity::Info)]
+    min_severity: MinSeverity,
+    /// Seconds between two reads of the guest configs and cgroups.
+    #[arg(long, value_name = "SECS", default_value_t = 2)]
+    poll: u64,
+    #[arg(long, default_value = "/etc/pve", hide = true)]
+    pve: PathBuf,
+    #[arg(short = 'o', long, value_enum, default_value_t = Output::Pretty)]
+    output: Output,
+}
+
+#[derive(Clone, Copy, PartialEq, PartialOrd, ValueEnum)]
+enum MinSeverity {
+    Info,
+    Warning,
+    Critical,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -137,6 +167,7 @@ async fn main() -> Result<()> {
                 }
             })
         }
+        Command::Watch(args) => tokio::task::spawn_blocking(move || run_watch(args)).await?,
         Command::Vulns(args) => {
             let client = MlabClient::new(&args.mlab_url, std::env::var("MLAB_API_KEY").ok())?;
             let cache = Cache::new(Cache::default_dir(), Cache::DEFAULT_TTL, !args.no_cache);
@@ -204,6 +235,53 @@ fn collect(scope: &Scope) -> Result<Vec<Inventory>> {
         invs.insert(0, inventory::host_inventory(&host, scope.match_kernel));
     }
     Ok(invs)
+}
+
+fn run_watch(args: WatchArgs) -> Result<()> {
+    use watch::Severity;
+    procfs::check_root_access()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let names = watch::Names::default();
+    {
+        let (pve, names, tx) = (args.pve.clone(), names.clone(), tx.clone());
+        let every = std::time::Duration::from_secs(args.poll.max(1));
+        std::thread::spawn(move || watch::poll_config(pve, names, every, tx));
+    }
+    // A source that can't start (no journalctl, not Linux) is reported, the others go on.
+    let spawn =
+        |name: &'static str,
+         f: fn(watch::Names, std::sync::mpsc::Sender<watch::Event>) -> Result<()>| {
+            let (names, tx) = (names.clone(), tx.clone());
+            std::thread::spawn(move || {
+                if let Err(e) = f(names, tx) {
+                    tracing::error!("{name} events stopped: {e:#}");
+                }
+            });
+        };
+    if !args.no_exec {
+        spawn("exec", watch::follow_exec);
+    }
+    if !args.no_journal {
+        spawn("journal", watch::follow_journal);
+    }
+    drop(tx);
+    let min = match args.min_severity {
+        MinSeverity::Info => Severity::Info,
+        MinSeverity::Warning => Severity::Warning,
+        MinSeverity::Critical => Severity::Critical,
+    };
+    let color = color();
+    for ev in rx {
+        if ev.severity < min {
+            continue;
+        }
+        let line = match args.output {
+            Output::Pretty => ev.pretty(color),
+            Output::Json => serde_json::to_string(&ev)?,
+        };
+        print(&(line + "\n"))?;
+    }
+    Ok(())
 }
 
 fn color() -> bool {
