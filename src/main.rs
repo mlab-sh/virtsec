@@ -1,5 +1,6 @@
 //! virtsec: runtime security CLI for Proxmox VE nodes. Runs as root on the node.
 
+mod audit;
 mod cache;
 mod guest;
 mod inventory;
@@ -55,6 +56,14 @@ enum Command {
     },
     /// Vulnerabilities of every guest and of the node (vuln.mlab.sh).
     Vulns(VulnsArgs),
+    /// Security posture: node config (firewall, 2FA, SSH, repos), guest risks, restart / reboot needed.
+    Audit {
+        #[command(flatten)]
+        scope: Scope,
+        /// Exit with status 3 when a check at or above this severity fails.
+        #[arg(long, value_enum, value_name = "SEVERITY")]
+        fail_on: Option<MinSeverity>,
+    },
     /// Run as an mlab-agent tool on stdin/stdout (the agent starts it).
     Serve,
     /// Live stream: guest execs (and with eBPF connects, file writes), PVE logins and tasks, guest config changes.
@@ -172,6 +181,29 @@ async fn main() -> Result<()> {
                 }
             })
         }
+        Command::Audit { scope, fail_on } => {
+            let (invs, scope) =
+                tokio::task::spawn_blocking(move || collect(&scope).map(|i| (i, scope))).await??;
+            let checks = audit::audit(
+                &audit::Paths {
+                    pve: &scope.pve,
+                    root: std::path::Path::new("/"),
+                },
+                &invs,
+            );
+            print(&match scope.output {
+                Output::Pretty => audit::pretty(&checks, color()),
+                Output::Json => {
+                    serde_json::to_string_pretty(&serde_json::json!({ "checks": checks }))? + "\n"
+                }
+            })?;
+            if let Some(min) = fail_on.map(severity) {
+                if checks.iter().any(|c| c.severity >= min) {
+                    std::process::exit(3);
+                }
+            }
+            Ok(())
+        }
         Command::Serve => tokio::task::spawn_blocking(serve::serve).await?,
         Command::Watch(args) => tokio::task::spawn_blocking(move || run_watch(args)).await?,
         Command::Vulns(args) => {
@@ -213,7 +245,6 @@ fn collect(scope: &Scope) -> Result<Vec<Inventory>> {
 }
 
 fn run_watch(args: WatchArgs) -> Result<()> {
-    use watch::Severity;
     procfs::check_root_access()?;
     let (tx, rx) = std::sync::mpsc::channel();
     let names = watch::Names::default();
@@ -243,11 +274,7 @@ fn run_watch(args: WatchArgs) -> Result<()> {
         spawn("journal", watch::follow_journal);
     }
     drop(tx);
-    let min = match args.min_severity {
-        MinSeverity::Info => Severity::Info,
-        MinSeverity::Warning => Severity::Warning,
-        MinSeverity::Critical => Severity::Critical,
-    };
+    let min = severity(args.min_severity);
     let color = color();
     for ev in rx {
         if ev.severity < min {
@@ -260,6 +287,14 @@ fn run_watch(args: WatchArgs) -> Result<()> {
         print(&(line + "\n"))?;
     }
     Ok(())
+}
+
+fn severity(s: MinSeverity) -> watch::Severity {
+    match s {
+        MinSeverity::Info => watch::Severity::Info,
+        MinSeverity::Warning => watch::Severity::Warning,
+        MinSeverity::Critical => watch::Severity::Critical,
+    }
 }
 
 fn color() -> bool {

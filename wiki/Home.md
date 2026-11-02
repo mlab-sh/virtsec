@@ -51,6 +51,7 @@ vs-alpine-priv  Alpine Linux v3.22
 | --- | --- |
 | [`inventory`](Inventory) | Packages of every guest and of the node, loaded / dormant, `--sbom` CycloneDX per guest. |
 | [`vulns`](Vulns) | Inventory + CVE matching, loaded and KEV first, filters for triage. |
+| [`audit`](Audit) | Posture: PVE firewall, 2FA, API tokens, SSH, repositories, guest risks, restart / reboot needed. `--fail-on` for CI. |
 | [`watch`](Watch) | Live stream: exec / connect / file writes in guests, PVE journal, config changes. |
 | `serve` | As a tool of mlab-agent, everything above driven from an mlab workspace: [Tool API](Tool-API), [Deployment](Deployment). |
 

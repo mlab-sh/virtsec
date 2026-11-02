@@ -5,6 +5,7 @@
 **Commands**
 - [inventory](Inventory)
 - [vulns](Vulns)
+- [audit](Audit)
 - [watch](Watch)
 
 **Details**

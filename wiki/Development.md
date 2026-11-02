@@ -4,7 +4,8 @@
 
 ```text
 src/
-  main.rs       CLI (clap): inventory, vulns, watch, serve
+  main.rs       CLI (clap): inventory, vulns, audit, watch, serve
+  audit.rs      posture checks: node config, guest risks, restart / reboot
   guest.rs      guests from /etc/pve, config risks, cgroup → guest
   inventory.rs  LXC (live root), VM (guest agent), node (host + PVE CPEs)
   qga.rs        qemu-guest-agent client, hostile-archive unpacking

@@ -16,6 +16,8 @@ the node.
   first; the PVE stack (QEMU, LXC) by upstream CPE.
 - **Isolation risks** from each guest's config: privileged containers, host
   bind mounts, passthrough, raw `lxc.*` / QEMU `args`, hookscripts.
+- **A posture audit** of the node: PVE firewall, second factors, API tokens,
+  SSH, APT repositories, plus guest risks and restart / reboot needed.
 - **A live stream**: execs in guests, outbound connects and sensitive writes
   (eBPF), PVE logins and tasks, config changes, and anything run from a VM's
   QEMU cgroup (a possible VM escape).
@@ -39,7 +41,7 @@ outputs from a test node:
 
 | | |
 |---|---|
-| Commands | [inventory](https://github.com/mlab-sh/virtsec/wiki/Inventory) · [vulns](https://github.com/mlab-sh/virtsec/wiki/Vulns) · [watch](https://github.com/mlab-sh/virtsec/wiki/Watch) |
+| Commands | [inventory](https://github.com/mlab-sh/virtsec/wiki/Inventory) · [vulns](https://github.com/mlab-sh/virtsec/wiki/Vulns) · [audit](https://github.com/mlab-sh/virtsec/wiki/Audit) · [watch](https://github.com/mlab-sh/virtsec/wiki/Watch) |
 | Details | [Guest risks](https://github.com/mlab-sh/virtsec/wiki/Guest-Risks) · [eBPF probe](https://github.com/mlab-sh/virtsec/wiki/eBPF-Probe) |
 | mlab | [Tool API (mlab-agent)](https://github.com/mlab-sh/virtsec/wiki/Tool-API) · [Deployment](https://github.com/mlab-sh/virtsec/wiki/Deployment) |
 | Operations | [Known limits](https://github.com/mlab-sh/virtsec/wiki/Known-Limits) · [Development](https://github.com/mlab-sh/virtsec/wiki/Development) |
