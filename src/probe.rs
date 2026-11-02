@@ -180,7 +180,12 @@ fn is_local(ip: IpAddr) -> bool {
 }
 
 fn to_event(ev: &KEvent, names: &Names, cgroups: &mut CgroupIndex) -> Option<Event> {
-    let (gk, vmid) = watch::guest_of_pid(ev.pid).or_else(|| cgroups.get(ev.cgroup_id))?;
+    let Some((gk, vmid)) = watch::guest_of_pid(ev.pid).or_else(|| cgroups.get(ev.cgroup_id)) else {
+        if ev.kind == kind::EXEC {
+            watch::note_host_exec(ev.pid);
+        }
+        return None;
+    };
     let comm = cstr(&ev.comm);
     let (sev, k, msg) = match (ev.kind, gk) {
         (kind::EXEC, _) => {

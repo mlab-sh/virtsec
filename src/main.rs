@@ -88,6 +88,9 @@ struct WatchArgs {
     pve: PathBuf,
     #[arg(short = 'o', long, value_enum, default_value_t = Output::Pretty)]
     output: Output,
+    /// Hide events matching a rule of this file (one per line: `key=value ...`, `message~=text`).
+    #[arg(long, value_name = "FILE")]
+    ignore: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, PartialOrd, ValueEnum)]
@@ -273,6 +276,11 @@ fn collect(scope: &Scope) -> Result<Vec<Inventory>> {
 
 fn run_watch(args: WatchArgs) -> Result<()> {
     procfs::check_root_access()?;
+    let rules = match &args.ignore {
+        Some(f) => watch::Rules::parse(&std::fs::read_to_string(f)?)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?,
+        None => watch::Rules::default(),
+    };
     let (tx, rx) = std::sync::mpsc::channel();
     let names = watch::Names::default();
     {
@@ -304,7 +312,7 @@ fn run_watch(args: WatchArgs) -> Result<()> {
     let min = severity(args.min_severity);
     let color = color();
     for ev in rx {
-        if ev.severity < min {
+        if ev.severity < min || rules.ignores(&ev) {
             continue;
         }
         let line = match args.output {

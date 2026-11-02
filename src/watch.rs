@@ -7,12 +7,17 @@
 //! - **pve**: logins, authentication failures and tasks, from the journal of
 //!   pvedaemon / pveproxy / sshd.
 //! - **config**: guests created, removed, started, stopped, and isolation risks
-//!   added to or removed from their config (polled, pmxcfs has no inotify).
+//!   added to or removed from their config (polled, pmxcfs has no inotify);
+//!   new listening sockets (TCP, UDP) on the node and in each container.
+//!
+//! A container's first [`BOOT_GRACE`] is its boot, and the same span after PVE
+//! runs `lxc-stop` on it its shutdown: their info-level execs are counted
+//! into one `boot_execs` event, not shown one by one (listeners: a baseline).
 
 // The exec source is Linux-only; its helpers are still unit-tested elsewhere.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -105,6 +110,300 @@ pub fn guest_ref(names: &Names, kind: GuestKind, vmid: u32) -> GuestRef {
     GuestRef { kind, vmid, name }
 }
 
+// ---------------------------------------------------------------- boot grace
+
+/// How long after its start a container is booting.
+pub const BOOT_GRACE: Duration = Duration::from_secs(60);
+
+/// Info-level execs hidden per booting container, reported once it is up.
+static BOOT_HIDDEN: Mutex<BTreeMap<u32, usize>> = Mutex::new(BTreeMap::new());
+
+/// When PVE last ran `lxc-stop` on a container (shutdown, reboot, stop).
+static STOPPING: Mutex<BTreeMap<u32, std::time::Instant>> = Mutex::new(BTreeMap::new());
+
+/// Whether LXC `vmid` is starting or stopping: its cgroup directory was
+/// created (its ctime) less than [`BOOT_GRACE`] ago, or `lxc-stop` ran on it.
+pub fn booting(vmid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let stopping = STOPPING
+        .lock()
+        .ok()
+        .and_then(|s| s.get(&vmid).map(|t| t.elapsed() < BOOT_GRACE))
+        .unwrap_or(false);
+    let Ok(m) = std::fs::metadata(format!("/sys/fs/cgroup/lxc/{vmid}")) else {
+        return stopping;
+    };
+    let now = Utc::now().timestamp();
+    stopping || (0..BOOT_GRACE.as_secs() as i64).contains(&(now - m.ctime()))
+}
+
+/// The container `lxc-stop` is run on (`-n 4002`, `--name=4002`).
+fn lxc_stop_target(argv: &[&str]) -> Option<u32> {
+    let name = argv.first()?.rsplit('/').next()?;
+    if name != "lxc-stop" {
+        return None;
+    }
+    argv.windows(2)
+        .find_map(|w| matches!(w[0], "-n" | "--name").then_some(w[1]))
+        .or_else(|| argv.iter().find_map(|a| a.strip_prefix("--name=")))?
+        .parse()
+        .ok()
+}
+
+/// A program the host itself runs: not an event, but `lxc-stop` starts a
+/// container's shutdown.
+pub fn note_host_exec(pid: u32) {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return;
+    };
+    let cmdline = String::from_utf8_lossy(&cmdline);
+    let argv: Vec<&str> = cmdline.split('\0').filter(|a| !a.is_empty()).collect();
+    if let (Some(vmid), Ok(mut s)) = (lxc_stop_target(&argv), STOPPING.lock()) {
+        s.insert(vmid, std::time::Instant::now());
+    }
+}
+
+/// One `boot_execs` event per container whose boot ended with hidden execs.
+fn boot_summaries(names: &Names) -> Vec<Event> {
+    let Ok(mut hidden) = BOOT_HIDDEN.lock() else {
+        return Vec::new();
+    };
+    let done: Vec<u32> = hidden.keys().copied().filter(|v| !booting(*v)).collect();
+    done.into_iter()
+        .filter_map(|vmid| {
+            let n = hidden.remove(&vmid)?;
+            let mut ev = Event::new(
+                Severity::Info,
+                "exec",
+                "boot_execs",
+                format!("{n} execs while the container started or stopped not shown"),
+            );
+            ev.guest = Some(guest_ref(names, GuestKind::Lxc, vmid));
+            ev.fields.insert("count".into(), n.to_string());
+            Some(ev)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------- listeners
+
+/// `tcp 0.0.0.0:22`, `udp [::]:53`: one listening socket.
+type Listen = (&'static str, std::net::SocketAddr);
+
+/// The address of a `/proc/net/{tcp,udp}[6]` column (`0100007F:0019`): the
+/// kernel prints each 32-bit word of the address in host order.
+fn parse_addr(s: &str) -> Option<std::net::SocketAddr> {
+    let (ip, port) = s.split_once(':')?;
+    let port = u16::from_str_radix(port, 16).ok()?;
+    // Each word's bytes, as they are in memory: the address in network order.
+    let bytes: Vec<u8> = (0..ip.len() / 8)
+        .map(|i| u32::from_str_radix(ip.get(i * 8..i * 8 + 8)?, 16).ok())
+        .collect::<Option<Vec<u32>>>()?
+        .into_iter()
+        .flat_map(u32::to_ne_bytes)
+        .collect();
+    let ip: std::net::IpAddr = match bytes.len() {
+        4 => <[u8; 4]>::try_from(bytes)
+            .ok()
+            .map(std::net::Ipv4Addr::from)?
+            .into(),
+        16 => <[u8; 16]>::try_from(bytes)
+            .ok()
+            .map(std::net::Ipv6Addr::from)?
+            .into(),
+        _ => return None,
+    };
+    Some(std::net::SocketAddr::new(ip, port))
+}
+
+/// Listening sockets of one `/proc/net` table, with their inode. UDP has no
+/// listen state: an unconnected socket bound below the ephemeral range
+/// (32768) is a server; above, it is a client's (a resolver's) and skipped.
+pub fn parse_net(content: &str, proto: &'static str) -> Vec<(Listen, u64)> {
+    content
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (local, remote, st, inode) = (f.get(1)?, f.get(2)?, f.get(3)?, f.get(9)?);
+            let addr = parse_addr(local)?;
+            let listening = match proto {
+                "tcp" => *st == "0A",
+                _ => *st == "07" && remote.ends_with(":0000") && addr.port() < 32768,
+            };
+            listening.then(|| ((proto, addr), inode.parse().unwrap_or(0)))
+        })
+        .collect()
+}
+
+/// Every listening socket of `pid`'s network namespace, by inode.
+fn listeners(pid: u32) -> BTreeMap<Listen, u64> {
+    let mut out = BTreeMap::new();
+    for (file, proto) in [
+        ("tcp", "tcp"),
+        ("tcp6", "tcp"),
+        ("udp", "udp"),
+        ("udp6", "udp"),
+    ] {
+        if let Ok(c) = std::fs::read_to_string(format!("/proc/{pid}/net/{file}")) {
+            out.extend(parse_net(&c, proto));
+        }
+    }
+    out
+}
+
+/// `comm[pid]` of the first of `pids` holding socket `inode`.
+fn socket_owner(pids: &[u32], inode: u64) -> Option<(u32, String)> {
+    let target = format!("socket:[{inode}]");
+    pids.iter().find_map(|&pid| {
+        std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .ok()?
+            .flatten()
+            .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|l| l.as_os_str() == target.as_str()))
+            .then(|| {
+                let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+                (pid, comm.trim().to_string())
+            })
+    })
+}
+
+fn netns(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/ns/net")).ok()
+}
+
+/// A guest, or the node (`None`).
+type Key = Option<(GuestKind, u32)>;
+
+/// Listening sockets seen at the previous poll, per guest or node.
+type Sockets = HashMap<Key, BTreeSet<Listen>>;
+
+/// New listening sockets since `prev` (which this updates). A guest seen for
+/// the first time, or booting, is a baseline: its sockets are not reported.
+fn new_listeners(
+    prev: &mut Option<Sockets>,
+    by_guest: &HashMap<(GuestKind, u32), Vec<u32>>,
+    host_pids: &[u32],
+    names: &Names,
+) -> Vec<Event> {
+    let host_ns = netns(1);
+    // (whose, a pid in its netns, all its pids)
+    let mut now: Vec<(Key, u32, &[u32])> = Vec::new();
+    now.push((None, 1, host_pids));
+    for (&(kind, vmid), pids) in by_guest {
+        // A VM's network is its kernel's; QEMU sits in the host's netns.
+        let Some(&pid) = pids
+            .iter()
+            .find(|p| kind == GuestKind::Lxc && netns(**p) != host_ns)
+        else {
+            continue;
+        };
+        now.push((Some((kind, vmid)), pid, pids));
+    }
+    let mut out = Vec::new();
+    let mut next: Sockets = HashMap::new();
+    for (key, pid, pids) in now {
+        let socks = listeners(pid);
+        let seen = prev.as_ref().and_then(|p| p.get(&key));
+        let baseline = seen.is_none() || key.is_some_and(|(_, v)| booting(v));
+        if let (Some(seen), false) = (seen, baseline) {
+            for (l @ (proto, addr), inode) in &socks {
+                if seen.contains(l) {
+                    continue;
+                }
+                let owner = socket_owner(pids, *inode);
+                let by = owner
+                    .as_ref()
+                    .map(|(p, c)| format!(" ({c}[{p}])"))
+                    .unwrap_or_default();
+                let sev = match key {
+                    None if !addr.ip().is_loopback() => Severity::Warning,
+                    _ => Severity::Info,
+                };
+                let mut ev = Event::new(
+                    sev,
+                    "config",
+                    "listen",
+                    format!("new listening socket {proto} {addr}{by}"),
+                );
+                ev.guest = key.map(|(k, v)| guest_ref(names, k, v));
+                ev.fields.insert("proto".into(), proto.to_string());
+                ev.fields.insert("addr".into(), addr.to_string());
+                if let Some((p, c)) = owner {
+                    ev.fields.insert("pid".into(), p.to_string());
+                    ev.fields.insert("comm".into(), c);
+                }
+                out.push(ev);
+            }
+        }
+        next.insert(key, socks.into_keys().collect());
+    }
+    *prev = Some(next);
+    out
+}
+
+// ---------------------------------------------------------------- ignore rules
+
+/// `watch --ignore FILE`: one rule per line, space-separated `key=value`
+/// terms that must all match (`kind`, `source`, `severity`, `vmid`, `name`, or
+/// any field: `comm`, `user`, `dest`, ...); `message~=text` (the rest of the
+/// line) matches a substring. `#` starts a comment.
+#[derive(Debug, Default, Clone)]
+pub struct Rules(Vec<Vec<(String, String, bool)>>);
+
+impl Rules {
+    pub fn parse(content: &str) -> anyhow::Result<Self> {
+        let mut rules = Vec::new();
+        for (n, line) in content.lines().enumerate() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (head, message) = match line.split_once("message~=") {
+                Some((h, m)) => (h, Some(m.trim())),
+                None => (line, None),
+            };
+            let mut terms = Vec::new();
+            for t in head.split_whitespace() {
+                let (k, v) = t
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("line {}: `{t}` is not key=value", n + 1))?;
+                terms.push((k.to_string(), v.to_string(), false));
+            }
+            if let Some(m) = message {
+                terms.push(("message".into(), m.to_string(), true));
+            }
+            rules.push(terms);
+        }
+        Ok(Rules(rules))
+    }
+
+    /// Whether some rule matches `ev` entirely.
+    pub fn ignores(&self, ev: &Event) -> bool {
+        self.0.iter().any(|rule| {
+            rule.iter().all(|(k, v, substring)| {
+                let have = match k.as_str() {
+                    "kind" => Some(ev.kind.clone()),
+                    "source" => Some(ev.source.to_string()),
+                    "severity" => serde_json::to_value(ev.severity)
+                        .ok()
+                        .and_then(|s| s.as_str().map(str::to_string)),
+                    "vmid" => ev.guest.as_ref().map(|g| g.vmid.to_string()),
+                    "name" => ev.guest.as_ref().map(|g| g.name.clone()),
+                    "message" => Some(ev.message.clone()),
+                    f => ev.fields.get(f).cloned(),
+                };
+                have.is_some_and(|h| {
+                    if *substring {
+                        h.contains(v.as_str())
+                    } else {
+                        h == *v
+                    }
+                })
+            })
+        })
+    }
+}
+
 // ---------------------------------------------------------------- config
 
 #[derive(Clone, PartialEq)]
@@ -117,11 +416,11 @@ struct State {
 /// Poll `/etc/pve` and the guest cgroups every `every`, reporting what changed.
 pub fn poll_config(pve: PathBuf, names: Names, every: Duration, tx: Sender<Event>) {
     let mut prev: Option<HashMap<(GuestKind, u32), State>> = None;
+    let mut sockets: Option<Sockets> = None;
     loop {
-        let by_guest: HashMap<_, _> = guest::pids_by_guest()
-            .into_iter()
-            .filter_map(|(g, p)| Some((g?, p)))
-            .collect();
+        let mut all = guest::pids_by_guest();
+        let host_pids = all.remove(&None).unwrap_or_default();
+        let by_guest: HashMap<_, _> = all.into_iter().filter_map(|(g, p)| Some((g?, p))).collect();
         let now: HashMap<_, _> = guest::discover(&pve, &by_guest)
             .into_iter()
             .map(|g| {
@@ -138,11 +437,15 @@ pub fn poll_config(pve: PathBuf, names: Names, every: Duration, tx: Sender<Event
         if let Ok(mut n) = names.lock() {
             *n = now.iter().map(|(k, s)| (*k, s.name.clone())).collect();
         }
-        if let Some(prev) = &prev {
-            for ev in config_diff(prev, &now) {
-                if tx.send(ev).is_err() {
-                    return;
-                }
+        let mut events = prev
+            .as_ref()
+            .map(|p| config_diff(p, &now))
+            .unwrap_or_default();
+        events.extend(new_listeners(&mut sockets, &by_guest, &host_pids, &names));
+        events.extend(boot_summaries(&names));
+        for ev in events {
+            if tx.send(ev).is_err() {
+                return;
             }
         }
         prev = Some(now);
@@ -420,7 +723,10 @@ pub fn guest_of_pid(pid: u32) -> Option<(GuestKind, u32)> {
 
 /// The exec event for `pid`, or `None` for the host's own processes.
 pub fn exec_event(pid: u32, names: &Names) -> Option<Event> {
-    let (kind, vmid) = guest_of_pid(pid)?;
+    let Some((kind, vmid)) = guest_of_pid(pid) else {
+        note_host_exec(pid);
+        return None;
+    };
     let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "?".into());
@@ -462,6 +768,12 @@ pub fn exec_in_guest(
             )
         }
     };
+    if kind == GuestKind::Lxc && sev == Severity::Info && booting(vmid) {
+        if let Ok(mut h) = BOOT_HIDDEN.lock() {
+            *h.entry(vmid).or_default() += 1;
+        }
+        return None;
+    }
     let mut ev = Event::new(sev, "exec", k, msg);
     ev.guest = Some(guest_ref(names, kind, vmid));
     ev.fields = fields;
@@ -637,6 +949,85 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn proc_net_listeners() {
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+   0: 0100007F:0019 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 10581 1 0 100 0 0 10 0\n\
+   1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 9900 1 0\n\
+   2: 0A10A8C0:0016 0110A8C0:D2F0 01 00000000:00000000 02:000AF3C5 00000000     0        0 77 4 0\n";
+        let got: Vec<String> = parse_net(tcp, "tcp")
+            .iter()
+            .map(|((p, a), i)| format!("{p} {a} {i}"))
+            .collect();
+        assert_eq!(got, ["tcp 127.0.0.1:25 10581", "tcp 0.0.0.0:22 9900"]);
+        let tcp6 = "h\n   0: 00000000000000000000000000000000:1F46 00000000000000000000000000000000:0000 0A 0 0 0 0 0 0 5\n\
+   1: 00000000000000000000000001000000:0019 00000000000000000000000000000000:0000 0A 0 0 0 0 0 0 6\n";
+        let got: Vec<String> = parse_net(tcp6, "tcp")
+            .iter()
+            .map(|((_, a), _)| a.to_string())
+            .collect();
+        assert_eq!(got, ["[::]:8006", "[::1]:25"]);
+        let udp = "h\n   0: 00000000:0035 00000000:0000 07 0 0 0 0 0 0 7\n\
+   1: 00000000:E1A2 00000000:0000 07 0 0 0 0 0 0 8\n\
+   2: 0A10A8C0:0035 08080808:0035 01 0 0 0 0 0 0 9\n";
+        let got: Vec<String> = parse_net(udp, "udp")
+            .iter()
+            .map(|((_, a), _)| a.to_string())
+            .collect();
+        assert_eq!(
+            got,
+            ["0.0.0.0:53"],
+            "ephemeral and connected sockets are clients"
+        );
+    }
+
+    #[test]
+    fn lxc_stop_targets() {
+        assert_eq!(
+            lxc_stop_target(&["/usr/bin/lxc-stop", "-n", "4002", "--timeout", "60"]),
+            Some(4002)
+        );
+        assert_eq!(
+            lxc_stop_target(&["lxc-stop", "--name=101", "--kill"]),
+            Some(101)
+        );
+        assert_eq!(lxc_stop_target(&["lxc-start", "-n", "4002"]), None);
+        assert_eq!(lxc_stop_target(&["lxc-stop"]), None);
+    }
+
+    #[test]
+    fn ignore_rules() {
+        let rules = Rules::parse(
+            "# noise\nkind=exec vmid=4001 message~=/usr/sbin/logrotate --state x\n\
+             kind=connect comm=apt-get   # updates\n",
+        )
+        .unwrap();
+        let mut ev = Event::new(
+            Severity::Info,
+            "exec",
+            "exec",
+            "/usr/sbin/logrotate --state x /etc/l".into(),
+        );
+        ev.guest = Some(GuestRef {
+            kind: GuestKind::Lxc,
+            vmid: 4001,
+            name: "web".into(),
+        });
+        assert!(rules.ignores(&ev));
+        ev.guest.as_mut().unwrap().vmid = 4002;
+        assert!(!rules.ignores(&ev));
+        let mut c = Event::new(
+            Severity::Info,
+            "ebpf",
+            "connect",
+            "connect 1.2.3.4:80 (apt-get)".into(),
+        );
+        assert!(!rules.ignores(&c));
+        c.fields.insert("comm".into(), "apt-get".into());
+        assert!(rules.ignores(&c));
+        assert!(Rules::parse("kind exec\n").is_err());
     }
 
     #[test]

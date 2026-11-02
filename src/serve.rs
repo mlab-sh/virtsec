@@ -327,7 +327,7 @@ fn keeps(settings: &Settings, config: &Config, ev: &watch::Event) -> bool {
     }
     if matches!(ev.source, "exec" | "ebpf") && !config.kinds.is_empty() {
         let base = match ev.kind.as_str() {
-            "exec" | "vm_cgroup_exec" => "exec",
+            "exec" | "vm_cgroup_exec" | "boot_execs" => "exec",
             "connect" | "vm_cgroup_connect" => "connect",
             _ => "file_write",
         };

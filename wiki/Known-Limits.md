@@ -40,10 +40,15 @@ What virtsec does **not** see yet.
 
 - **Without eBPF**, a process that exits before its `/proc` entry is read is
   lost (the proc connector gives the PID only).
-- **Written paths are as passed** to `open()`: a relative path is not resolved
-  against the process's working directory.
-- **No UDP**, no listening sockets, no file reads; writes outside the
-  sensitive prefixes are not reported.
-- **Boot noise**: a guest starting floods `info` with its init's execs.
+- **Written paths are as passed** to `open()`: the sensitive prefixes are
+  matched in the kernel, so a relative path (`cd /etc; echo x > passwd`) is
+  never reported; resolving it would mean sending every relative write-open
+  to userspace.
+- **No UDP traffic**, no file reads; writes outside the sensitive prefixes
+  are not reported. Listening sockets are polled: one opened and closed
+  between two polls (2 s) is missed, and VMs' are not seen.
+- **Start / stop grace**: a container's info-level execs in its first 60 s,
+  or within 60 s of `lxc-stop`, are only counted. An attacker who acts then
+  shows as a count, unless the exec is a warning (from `/tmp`, ...).
 - **Config changes are polled** (every 2 s): two changes inside one poll
   interval show as one diff.

@@ -169,14 +169,15 @@ pub struct SecEvent {
     /// `exec`, `vm_cgroup_exec`, `connect`, `vm_cgroup_connect`, `file_write`,
     /// `vm_cgroup_write`, `auth_failure`, `login`, `task`, `ssh_login`,
     /// `ssh_failure`, `guest_created`, `guest_removed`, `started`, `stopped`,
-    /// `risk_added`, `risk_removed`.
+    /// `risk_added`, `risk_removed`, `listen` (source `config`), `boot_execs`
+    /// (source `exec`).
     pub kind: String,
     pub severity: Severity,
     /// `None` for node-level events (API logins, SSH).
     pub guest: Option<GuestRef>,
     pub message: String,
     /// Flat fields: `pid`, `ppid`, `uid`, `comm`, `user`, `rhost`, `task`,
-    /// `vmid`, `dest`.
+    /// `vmid`, `dest`, `proto`, `addr` (`listen`), `count` (`boot_execs`).
     pub metadata: BTreeMap<String, String>,
     /// Raw detail; `null` when none. Connects carry `{"dest": "ip:port"}`.
     pub payload: serde_json::Value,

@@ -2,7 +2,7 @@
 
 ```text
 virtsec watch [--min-severity info|warning|critical] [--no-exec] [--no-journal]
-              [--poll SECS] [-o pretty|json]
+              [--poll SECS] [--ignore FILE] [-o pretty|json]
 ```
 
 One live stream of what happens on the node, one line per event (pretty) or
@@ -73,6 +73,20 @@ pmxcfs has no inotify):
 | `started`, `stopped` | info |
 | `risk_added` | warning |
 | `risk_removed` | info |
+| `listen` | warning on the node (not loopback), else info |
+
+**Listening sockets** (`listen`) are diffed at each poll, for the node and in
+each running container's network namespace (`/proc/<pid>/net/{tcp,udp}[6]`),
+with the owning process when it is found by its socket inode. TCP in `LISTEN`;
+UDP unconnected and bound below the ephemeral range (32768), as a server is.
+The first poll, a container seen for the first time or booting, is a baseline:
+
+```text
+19:52:39  WARN  config  new listening socket tcp 0.0.0.0:8999 (python3[69019])
+19:52:43  info  config  lxc/4002 vs-alpine-priv  new listening socket tcp [::]:4444 (nc[69025])
+```
+
+VMs are opaque (their sockets live in their own kernel).
 
 ## JSON
 
@@ -85,11 +99,37 @@ pmxcfs has no inotify):
 | `time` | UTC, RFC 3339 (pretty output shows local time). |
 | `severity` | `info`, `warning`, `critical`. |
 | `source` | `exec`, `ebpf`, `pve`, `config`. |
-| `kind` | See the tables above; exec events are `exec` or `vm_cgroup_exec`, eBPF ones `connect`, `vm_cgroup_connect`, `file_write`, `vm_cgroup_write`. |
+| `kind` | See the tables above; exec events are `exec`, `vm_cgroup_exec` or `boot_execs`, eBPF ones `connect`, `vm_cgroup_connect`, `file_write`, `vm_cgroup_write`. |
 | `guest` | `{kind, vmid, name}`, absent for node-level events (API logins). |
-| `fields` | Strings: `pid`, `ppid`, `uid` (host uid: `100000` is root in an unprivileged LXC), `comm`, `user`, `rhost`, `task`, `vmid`. |
+| `fields` | Strings: `pid`, `ppid`, `uid` (host uid: `100000` is root in an unprivileged LXC), `comm`, `user`, `rhost`, `task`, `vmid`; `proto`, `addr` on `listen`; `count` on `boot_execs`. |
 
 ## Noise
 
-A guest booting floods `info` with its init's execs (an Alpine start: ~110
-lines). `--min-severity warning` keeps what matters.
+**Start and stop.** A container's first 60 s (its cgroup's age), and the
+60 s after PVE runs `lxc-stop` on it (shutdown, reboot, stop), are its boot and
+shutdown: their info-level execs are counted, then reported as one line.
+Warnings (an exec from `/tmp`, a sensitive write) still show. A `pct reboot`
+of the Alpine container, ~350 lines before:
+
+```text
+19:58:02  info  config  lxc/4002 vs-alpine-priv  stopped
+19:58:04  info  config  lxc/4002 vs-alpine-priv  started
+19:58:05  WARN  ebpf    lxc/4002 vs-alpine-priv  write /etc/resolv.conf.234 (default.script)
+19:59:05  info  exec    lxc/4002 vs-alpine-priv  343 execs while the container started or stopped not shown
+```
+
+**`--ignore FILE`** hides what is expected on this node. One rule per line,
+`key=value` terms that must all match: `kind`, `source`, `severity`, `vmid`,
+`name` (the guest's), or any field (`comm`, `user`, `dest`, `uid`, ...);
+`message~=text` matches a substring and takes the rest of the line. `#`
+starts a comment:
+
+```text
+# backups and updates
+kind=exec vmid=4001 message~=/usr/sbin/logrotate
+kind=connect comm=apt-get
+kind=task user=backup@pve
+```
+
+`--min-severity warning` keeps what matters. In mlab, filtering is the
+workspace's (its config), not this file.

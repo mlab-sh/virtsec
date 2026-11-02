@@ -62,7 +62,7 @@ most 32 MiB). Batches are at most 768 KiB and 2000 events.
 | `severity` | `info`, `warning`, `critical` |
 | `guest` | `{kind: lxc\|qemu, vmid, name}`, null for node-level events |
 | `message` | text |
-| `metadata` | flat strings: `pid`, `ppid`, `uid`, `comm`, `user`, `rhost`, `task`, `vmid`, `dest` |
+| `metadata` | flat strings: `pid`, `ppid`, `uid`, `comm`, `user`, `rhost`, `task`, `vmid`, `dest`, `proto`, `addr`, `count` |
 | `payload` | `{"dest": "ip:port"}` on connects, else null |
 
 ## Config and policy
