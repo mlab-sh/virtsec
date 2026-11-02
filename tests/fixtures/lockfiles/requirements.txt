@@ -1,0 +1,6 @@
+# web deps
+Django==4.2.10
+requests[security]==2.31.0  # http
+pyyaml==6.0.1 ; python_version >= "3.8"
+flask>=2.0
+-r other.txt
