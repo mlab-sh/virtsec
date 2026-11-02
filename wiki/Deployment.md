@@ -44,7 +44,7 @@ inventory, vulnerabilities, the live stream, and the config.
    path = "/usr/bin/virtsec"
    sha256 = "<mlab-agent tools hash /usr/bin/virtsec>"
    enabled = true
-   allowed_ops = ["status", "configure", "events_since", "inventory", "sbom"]
+   allowed_ops = ["status", "configure", "events_since", "inventory", "sbom", "audit"]
 
    [tools.virtsec.settings]
    allow_ebpf = true
