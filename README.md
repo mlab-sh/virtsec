@@ -1,5 +1,7 @@
 # virtsec
 
+![virtsec](.github/banner.png)
+
 Runtime security CLI for **Proxmox VE** nodes: what runs in every LXC
 container and VM, which vulnerabilities touch code that is **actually
 loaded**, and what happens on the node, live. Written in Rust. Runs as root on
