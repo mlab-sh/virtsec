@@ -20,6 +20,8 @@ fn round_trips() {
     assert_eq!(from_cbor::<Status>(&to_cbor(&s).unwrap()).unwrap(), s);
     let inv = samples::inventory();
     assert_eq!(Inventory::decode(&inv.encode().unwrap()).unwrap(), inv);
+    let a = samples::audit();
+    assert_eq!(from_cbor::<Audit>(&to_cbor(&a).unwrap()).unwrap(), a);
 }
 
 #[test]

@@ -35,6 +35,7 @@ tagged by `t` (`init`, `call`, `shutdown` from the agent; `ready`,
 | `events_since` | `EventsSince {boot_id, after_seq}` | `Backlog {boot_id, batches (≤ 1), oldest_seq, last_seq}` |
 | `inventory` | `InventoryRequest {vmid?}`, needs an upload | blob: CBOR `Inventory`; body `InventoryInfo {guests, packages}` |
 | `sbom` | `SbomRequest {vmid?}` (none = the node), needs an upload | blob: CycloneDX 1.5 JSON; body `SbomInfo {vmid, components}` |
+| `audit` | none | `Audit {api_version, generated_at, node, checks: [AuditCheck {id, severity, guest?, message, fix?}]}`: the [audit](Audit), from the last inventory (else the guests' configs alone). An older virtsec answers `unknown_op`. Add `"audit"` to the policy's `allowed_ops`. |
 
 Errors use the agent's codes: `bad_request` (bad arguments, no upload target),
 `not_found` (no such guest inventoried), `unknown_op`, `internal`.

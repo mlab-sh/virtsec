@@ -574,6 +574,20 @@ fn node_info() -> api::NodeInfo {
     }
 }
 
+fn audit_check(c: &crate::audit::Check) -> api::AuditCheck {
+    api::AuditCheck {
+        id: c.id.into(),
+        severity: severity(c.severity),
+        guest: c.guest.as_ref().map(|g| api::GuestRef {
+            kind: guest_kind(g.kind),
+            vmid: g.vmid,
+            name: g.name.clone(),
+        }),
+        message: c.message.clone(),
+        fix: c.fix.clone(),
+    }
+}
+
 fn package(p: &model::Package) -> api::Package {
     api::Package {
         name: p.name.clone(),
@@ -679,6 +693,44 @@ fn call(
     let lock = || ctx.shared.lock().map_err(|_| internal("state poisoned"));
     match op_name {
         op::STATUS => reply(&status(&*lock()?)),
+        op::AUDIT => {
+            let (pve, node, mut invs, wanted) = {
+                let s = lock()?;
+                (
+                    s.pve.clone(),
+                    s.node.clone(),
+                    s.inventories.values().cloned().collect::<Vec<_>>(),
+                    vmids(&s.settings, &s.config),
+                )
+            };
+            // Without inventories yet (source off, first scan running), the
+            // guests' configs alone: their risks, firewall and backups.
+            if invs.iter().all(|i| i.guest.is_none()) {
+                invs.extend(
+                    crate::guest::discover(&pve, &Default::default())
+                        .into_iter()
+                        .filter(|g| inventory::wanted(g, &wanted, None))
+                        .map(|g| Inventory {
+                            name: g.name.clone(),
+                            guest: Some(g),
+                            ..Default::default()
+                        }),
+                );
+            }
+            let checks = crate::audit::audit(
+                &crate::audit::Paths {
+                    pve: &pve,
+                    root: Path::new("/"),
+                },
+                &invs,
+            );
+            reply(&api::Audit {
+                api_version: api::API_VERSION,
+                generated_at: chrono::Utc::now().timestamp_millis(),
+                node,
+                checks: checks.iter().map(audit_check).collect(),
+            })
+        }
         op::EVENTS_SINCE => {
             let a: api::EventsSince = args(raw)?;
             reply(&lock()?.stream.since(&a.boot_id, a.after_seq))

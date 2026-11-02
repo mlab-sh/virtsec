@@ -116,11 +116,40 @@ pub fn inventory() -> Inventory {
     }
 }
 
+pub fn audit() -> Audit {
+    Audit {
+        api_version: API_VERSION,
+        generated_at: 1_793_000_000_000,
+        node: "pve".into(),
+        checks: vec![
+            AuditCheck {
+                id: "users.no_second_factor".into(),
+                severity: Severity::Critical,
+                guest: None,
+                message: "no second factor: root@pam".into(),
+                fix: Some("Datacenter → Permissions → Two Factor".into()),
+            },
+            AuditCheck {
+                id: "guest.risk".into(),
+                severity: Severity::Warning,
+                guest: Some(GuestRef {
+                    kind: GuestKind::Lxc,
+                    vmid: 4002,
+                    name: "vs-alpine-priv".into(),
+                }),
+                message: "isolation risk: privileged".into(),
+                fix: None,
+            },
+        ],
+    }
+}
+
 pub fn all() -> Vec<(&'static str, Vec<u8>)> {
     vec![
         ("batch-v1", to_cbor(&batch()).unwrap()),
         ("status-v1", to_cbor(&status()).unwrap()),
         ("config-v1", to_cbor(&Config::default()).unwrap()),
         ("inventory-v1", inventory().encode().unwrap()),
+        ("audit-v1", to_cbor(&audit()).unwrap()),
     ]
 }

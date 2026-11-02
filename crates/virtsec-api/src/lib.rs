@@ -56,8 +56,12 @@ pub mod op {
     /// Arguments: [`super::SbomRequest`] + upload target. Answer: a blob (the
     /// CycloneDX 1.5 JSON) and a [`super::SbomInfo`] body.
     pub const SBOM: &str = "sbom";
+    /// No arguments. Answer: [`super::Audit`], the node's and its guests'
+    /// security posture (config checks, restart / reboot needed). Added in
+    /// v1: an older tool answers it `unknown op`.
+    pub const AUDIT: &str = "audit";
 
-    pub const ALL: [&str; 5] = [STATUS, CONFIGURE, EVENTS_SINCE, INVENTORY, SBOM];
+    pub const ALL: [&str; 6] = [STATUS, CONFIGURE, EVENTS_SINCE, INVENTORY, SBOM, AUDIT];
 }
 
 pub mod event {
@@ -404,6 +408,32 @@ pub struct InventoryInfo {
     /// Inventories in the blob (the node counts as one).
     pub guests: u32,
     pub packages: u32,
+}
+
+/// `audit`'s answer: the checks that failed, node first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Audit {
+    pub api_version: u16,
+    /// Unix milliseconds.
+    pub generated_at: i64,
+    pub node: String,
+    pub checks: Vec<AuditCheck>,
+}
+
+/// One failed check (the wiki's `Audit` page lists them).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditCheck {
+    /// Stable id: `firewall.datacenter`, `users.no_second_factor`,
+    /// `backup.missing`, `restart_needed`, `guest.risk`, ...
+    pub id: String,
+    pub severity: Severity,
+    /// The guest it is about; `None` for the node.
+    pub guest: Option<GuestRef>,
+    pub message: String,
+    /// What to change, in words.
+    pub fix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
