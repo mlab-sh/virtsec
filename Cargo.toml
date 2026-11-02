@@ -1,7 +1,7 @@
 [package]
 name = "virtsec"
 description = "Runtime security CLI for Proxmox VE nodes: LXC and VM inventory, loaded/dormant vulnerabilities"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/mlab-sh/virtsec"
