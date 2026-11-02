@@ -45,7 +45,7 @@ pub struct GuestRef {
 pub struct Event {
     pub time: DateTime<Utc>,
     pub severity: Severity,
-    /// `exec`, `pve` or `config`.
+    /// `exec`, `ebpf`, `pve` or `config`.
     pub source: &'static str,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,7 +56,7 @@ pub struct Event {
 }
 
 impl Event {
-    fn new(severity: Severity, source: &'static str, kind: &str, message: String) -> Self {
+    pub fn new(severity: Severity, source: &'static str, kind: &str, message: String) -> Self {
         Self {
             time: Utc::now(),
             severity,
@@ -96,7 +96,7 @@ impl Event {
 /// Guest names by id, kept current by the config poller for the other sources.
 pub type Names = Arc<Mutex<HashMap<(GuestKind, u32), String>>>;
 
-fn guest_ref(names: &Names, kind: GuestKind, vmid: u32) -> GuestRef {
+pub fn guest_ref(names: &Names, kind: GuestKind, vmid: u32) -> GuestRef {
     let name = names
         .lock()
         .ok()
@@ -333,11 +333,8 @@ pub fn classify(ident: &str, msg: &str) -> Option<Event> {
 
 // ---------------------------------------------------------------- exec
 
-/// What the host says about a freshly exec'd process (racy: it may be gone).
-fn describe(pid: u32) -> (String, String, BTreeMap<String, String>) {
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "?".into());
+/// Command line, ppid and uid of a freshly exec'd process (racy: it may be gone).
+fn describe(pid: u32) -> (String, BTreeMap<String, String>) {
     let mut cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|b| {
             String::from_utf8_lossy(&b)
@@ -361,7 +358,7 @@ fn describe(pid: u32) -> (String, String, BTreeMap<String, String>) {
             }
         }
     }
-    (exe, cmdline, fields)
+    (cmdline, fields)
 }
 
 /// Programs QEMU legitimately runs in its own cgroup: itself, PVE's tap scripts.
@@ -372,29 +369,78 @@ fn expected_in_vm(exe: &str) -> bool {
         || exe.contains("/qemu-server/pve-bridge")
 }
 
-/// Whether `pid`'s root directory is the host's.
-fn same_root(pid: u32) -> bool {
+/// `(dev, ino)` of `pid`'s root directory.
+fn root_id(pid: u32) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
-    let id = |p: String| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
-    let host = id("/proc/1/root/".into());
-    host.is_some() && id(format!("/proc/{pid}/root/")) == host
+    std::fs::metadata(format!("/proc/{pid}/root/"))
+        .ok()
+        .map(|m| (m.dev(), m.ino()))
+}
+
+/// Whether an exec in LXC `vmid` is one of LXC's own hooks (lxcfs mounts,
+/// autodev, ...): those run in the container's cgroup, but on the host's root,
+/// before `pivot_root`. A process already gone is judged by its container: no
+/// process there on its own root yet (or any more) means it is starting or stopping.
+pub fn is_lxc_hook(vmid: u32, pid: u32) -> bool {
+    let host = root_id(1);
+    if let Some(root) = root_id(pid) {
+        return Some(root) == host;
+    }
+    let mut dirs = vec![PathBuf::from(format!("/sys/fs/cgroup/lxc/{vmid}"))];
+    while let Some(dir) = dirs.pop() {
+        if let Ok(procs) = std::fs::read_to_string(dir.join("cgroup.procs")) {
+            let own_root = procs
+                .lines()
+                .filter_map(|l| l.parse().ok())
+                .any(|p| root_id(p).is_some_and(|r| Some(r) != host));
+            if own_root {
+                return false;
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            dirs.extend(
+                entries
+                    .flatten()
+                    .filter(|e| e.path().is_dir())
+                    .map(|e| e.path()),
+            );
+        }
+    }
+    true
+}
+
+/// The guest of a live process, from its cgroup.
+pub fn guest_of_pid(pid: u32) -> Option<(GuestKind, u32)> {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .and_then(guest::guest_of_cgroup)
 }
 
 /// The exec event for `pid`, or `None` for the host's own processes.
 pub fn exec_event(pid: u32, names: &Names) -> Option<Event> {
-    let cg = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
-    let (kind, vmid) = cg
-        .lines()
-        .find_map(|l| l.strip_prefix("0::"))
-        .and_then(guest::guest_of_cgroup)?;
-    // LXC's start/stop hooks (lxcfs mounts, ...) run in the container's cgroup
-    // before `pivot_root`, still on the host's root: the host's doing, not the guest's.
-    if kind == GuestKind::Lxc && same_root(pid) {
+    let (kind, vmid) = guest_of_pid(pid)?;
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "?".into());
+    exec_in_guest(kind, vmid, pid, &exe, names)
+}
+
+/// An exec of `exe` by `pid` in a guest; `None` when expected (QEMU, LXC hooks).
+pub fn exec_in_guest(
+    kind: GuestKind,
+    vmid: u32,
+    pid: u32,
+    exe: &str,
+    names: &Names,
+) -> Option<Event> {
+    if kind == GuestKind::Lxc && is_lxc_hook(vmid, pid) {
         return None;
     }
-    let (exe, cmdline, fields) = describe(pid);
+    let (cmdline, fields) = describe(pid);
     let (sev, k, msg) = match kind {
-        GuestKind::Qemu if expected_in_vm(&exe) => return None,
+        GuestKind::Qemu if expected_in_vm(exe) => return None,
         GuestKind::Qemu => (
             Severity::Critical,
             "vm_cgroup_exec",

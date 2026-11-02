@@ -8,6 +8,8 @@ mod mlab;
 mod model;
 mod os;
 mod pkgdb;
+#[cfg(all(feature = "ebpf", target_os = "linux"))]
+mod probe;
 mod procfs;
 mod purl;
 mod qga;
@@ -58,7 +60,7 @@ enum Command {
 
 #[derive(Args)]
 struct WatchArgs {
-    /// No exec events (proc connector).
+    /// No kernel events (eBPF exec / connect / file writes, or proc connector exec).
     #[arg(long)]
     no_exec: bool,
     /// No pvedaemon / pveproxy / sshd journal events.
@@ -259,6 +261,9 @@ fn run_watch(args: WatchArgs) -> Result<()> {
             });
         };
     if !args.no_exec {
+        #[cfg(all(feature = "ebpf", target_os = "linux"))]
+        spawn("ebpf", probe::follow);
+        #[cfg(not(all(feature = "ebpf", target_os = "linux")))]
         spawn("exec", watch::follow_exec);
     }
     if !args.no_journal {

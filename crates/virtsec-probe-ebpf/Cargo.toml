@@ -1,0 +1,19 @@
+[package]
+name = "virtsec-probe-ebpf"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+
+# Bin name MUST differ from the package name: aya-build uses out/<pkg> as the
+# build target-dir and copies the artifact to out/<bin>; identical names collide.
+[[bin]]
+name = "virtsec-bpf"
+path = "src/main.rs"
+# BPF-target only: a host `cargo test --workspace` must not try to link it.
+test = false
+bench = false
+
+[dependencies]
+aya-ebpf = "0.1"
+virtsec-probe-common = { path = "../virtsec-probe-common" }

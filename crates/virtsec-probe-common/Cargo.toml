@@ -1,0 +1,11 @@
+[package]
+name = "virtsec-probe-common"
+description = "Shared repr(C) types passed from the virtsec eBPF programs to userspace"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# no_std, no dependencies: these types compile for both the BPF target and the
+# host loader.
+[dependencies]
