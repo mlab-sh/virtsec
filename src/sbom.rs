@@ -95,7 +95,7 @@ mod tests {
                 "pkg:deb/debian/libssl3@3.0.15-1?distro=debian-12".into(),
             )],
             mapped_files: 0,
-            warnings: vec![],
+            ..Default::default()
         };
         let bom = cyclonedx(&inv);
         assert_eq!(bom["bomFormat"], "CycloneDX");

@@ -135,7 +135,7 @@ impl Package {
 }
 
 /// The inventory of one guest, or of the Proxmox host itself (`guest: None`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Inventory {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,6 +150,21 @@ pub struct Inventory {
     /// Non-fatal problems (unsupported package db, unreadable lockfile, ...).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Packages upgraded on disk whose old files are still mapped: the fix is
+    /// not in effect until these processes restart.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub restart: Vec<Restart>,
+    /// Why the guest or the node needs a reboot (`/run/reboot-required`, a newer kernel).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reboot: Option<String>,
+}
+
+/// A package whose old version still runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Restart {
+    pub package: String,
+    /// `comm[pid]` of the processes holding it; empty in VMs (not reported).
+    pub processes: Vec<String>,
 }
 
 impl Inventory {

@@ -74,6 +74,40 @@ fn guest_line(inv: &Inventory, color: bool) -> Option<String> {
     Some(s)
 }
 
+/// Restart and reboot notices: an upgrade on disk that is not running yet.
+fn notices(inv: &Inventory) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if !inv.restart.is_empty() {
+        let pkgs: Vec<String> = inv
+            .restart
+            .iter()
+            .map(|r| {
+                if r.processes.is_empty() {
+                    r.package.clone()
+                } else {
+                    let mut p = r.processes.clone();
+                    let more = p.len().saturating_sub(4);
+                    p.truncate(4);
+                    let more = if more > 0 {
+                        format!(" +{more}")
+                    } else {
+                        String::new()
+                    };
+                    format!("{} ({}{more})", r.package, p.join(" "))
+                }
+            })
+            .collect();
+        out.push(format!(
+            "restart needed, old code still running: {}",
+            pkgs.join(", ")
+        ));
+    }
+    if let Some(r) = &inv.reboot {
+        out.push(format!("reboot needed: {r}"));
+    }
+    out
+}
+
 /// Loaded packages listed per guest in pretty output.
 const MAX_LOADED_SHOWN: usize = 12;
 
@@ -123,6 +157,9 @@ pub fn inventory_pretty(invs: &[Inventory], color: bool) -> String {
                 String::new()
             };
             let _ = writeln!(out, "  loaded: {}{more}", loaded.join(", "));
+        }
+        for n in notices(inv) {
+            let _ = writeln!(out, "  {} {n}", paint(color, "!", |s| s.red().to_string()));
         }
         for w in &inv.warnings {
             let _ = writeln!(
@@ -239,8 +276,8 @@ pub fn vulns_pretty(results: &[(&Inventory, &Vulns)], filter: &Filter, color: bo
                 ),
             );
         }
-        for w in &inv.warnings {
-            warn(&mut out, w.clone());
+        for w in notices(inv).into_iter().chain(inv.warnings.iter().cloned()) {
+            warn(&mut out, w);
         }
         out.push('\n');
     }
@@ -262,6 +299,8 @@ pub fn vulns_json(results: &[(&Inventory, &Vulns)], filter: &Filter) -> serde_js
                 "cached": v.cached,
                 "error": v.error,
                 "warnings": inv.warnings,
+                "restart": inv.restart,
+                "reboot": inv.reboot,
             })
         })
         .collect();
@@ -299,7 +338,7 @@ mod tests {
             guest: None,
             packages: vec![],
             mapped_files: 0,
-            warnings: vec![],
+            ..Default::default()
         };
         let v = Vulns {
             findings: vec![
@@ -329,6 +368,20 @@ mod tests {
         assert!(out.contains("LOADED   KEV  HIGH  7.5  CVE-1"), "{out}");
         assert!(out.contains("→ 3.0.15"));
         assert!(out.contains("2 packages not scanned"));
+        assert!(!out.contains("restart needed"));
+
+        let mut inv2 = inv.clone();
+        inv2.restart = vec![crate::model::Restart {
+            package: "libssl3".into(),
+            processes: vec!["nginx[12]".into(), "sshd[3]".into()],
+        }];
+        inv2.reboot = Some("kernel 7.0.2-10-pve installed, 7.0.2-6-pve running".into());
+        let out = vulns_pretty(&[(&inv2, &v)], &Filter::default(), false);
+        assert!(
+            out.contains("! restart needed, old code still running: libssl3 (nginx[12] sshd[3])"),
+            "{out}"
+        );
+        assert!(out.contains("! reboot needed: kernel 7.0.2-10-pve installed"));
 
         let only = Filter {
             only_loaded: true,

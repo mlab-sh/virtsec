@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crate::guest::{Guest, GuestKind};
 use crate::lang::{self, LangLimits};
-use crate::model::{Coordinate, Inventory, Package, PackageKind, Reachability};
+use crate::model::{Coordinate, Inventory, Package, PackageKind, Reachability, Restart};
 use crate::os::OsRelease;
 use crate::pkgdb;
 use crate::procfs;
@@ -30,15 +30,40 @@ fn empty(guest: &Guest, os: Option<OsRelease>, warning: String) -> Inventory {
         packages: Vec::new(),
         mapped_files: 0,
         warnings: vec![warning],
+        ..Default::default()
     }
 }
 
-/// OS packages of `rootfs`, tagged loaded from `mapped` (in-root paths).
+/// What the processes of a guest (or of the node) have mapped.
+#[derive(Default)]
+struct Mapped {
+    files: BTreeSet<String>,
+    /// Files replaced on disk since they were mapped, by process label
+    /// (`comm[pid]`, empty when unknown).
+    deleted: Vec<(String, BTreeSet<String>)>,
+}
+
+impl Mapped {
+    fn of_pids(pids: &[u32]) -> Self {
+        let mut m = Mapped::default();
+        for &pid in pids {
+            let (files, deleted) = procfs::mapped_files(pid);
+            m.files.extend(files);
+            if !deleted.is_empty() {
+                m.deleted.push((procfs::label(pid), deleted));
+            }
+        }
+        m
+    }
+}
+
+/// OS packages of `rootfs`, tagged loaded from `mapped` (in-root paths), and
+/// those whose replaced files are still mapped.
 fn os_packages(
     rootfs: &Rootfs,
     os: Option<&OsRelease>,
-    mapped: &BTreeSet<String>,
-) -> (Vec<Package>, Vec<String>) {
+    mapped: &Mapped,
+) -> (Vec<Package>, Vec<String>, Vec<Restart>) {
     let (mut packages, mut warnings) = pkgdb::read(rootfs, os);
     if packages.is_empty() && warnings.is_empty() {
         warnings.push("no OS package database found".into());
@@ -48,9 +73,56 @@ fn os_packages(
         &mut packages,
         &index,
         rootfs,
-        mapped.iter().map(String::as_str),
+        mapped.files.iter().map(String::as_str),
     );
-    (packages, warnings)
+    let restart = restarts(&packages, &index, rootfs, &mapped.deleted);
+    (packages, warnings, restart)
+}
+
+/// Group deleted mapped files by owning package. A file no package owns any
+/// more (package removed, memfd, `/dev/shm`) is not an upgrade: skipped.
+fn restarts(
+    packages: &[Package],
+    index: &FileIndex,
+    rootfs: &Rootfs,
+    deleted: &[(String, BTreeSet<String>)],
+) -> Vec<Restart> {
+    let mut by_pkg: std::collections::BTreeMap<usize, BTreeSet<String>> = Default::default();
+    for (proc, files) in deleted {
+        for f in files {
+            if let Some(i) = index.owner(rootfs, f) {
+                let procs = by_pkg.entry(i).or_default();
+                if !proc.is_empty() {
+                    procs.insert(proc.clone());
+                }
+            }
+        }
+    }
+    by_pkg
+        .into_iter()
+        .map(|(i, procs)| Restart {
+            package: packages[i].name.clone(),
+            processes: procs.into_iter().collect(),
+        })
+        .collect()
+}
+
+/// Debian / Ubuntu's `/run/reboot-required` (and the packages that asked for it).
+fn reboot_required(rootfs: &Rootfs) -> Option<String> {
+    if !rootfs.exists("/run/reboot-required") {
+        return None;
+    }
+    let pkgs = rootfs
+        .read_string("/run/reboot-required.pkgs", 64 * 1024)
+        .unwrap_or_default();
+    let mut pkgs: Vec<&str> = pkgs.split_whitespace().collect();
+    pkgs.sort();
+    pkgs.dedup();
+    Some(if pkgs.is_empty() {
+        "/run/reboot-required".to_string()
+    } else {
+        format!("/run/reboot-required by {}", pkgs.join(", "))
+    })
 }
 
 /// A running container, through the live root of its processes.
@@ -63,8 +135,8 @@ pub fn scan_lxc(guest: &Guest, pids: &[u32], limits: &LangLimits) -> Inventory {
         return empty(guest, None, "stopped: not inspected".into());
     };
     let os = OsRelease::read(&rootfs);
-    let mapped: BTreeSet<String> = pids.iter().flat_map(|&p| procfs::mapped_files(p)).collect();
-    let (mut packages, warnings) = os_packages(&rootfs, os.as_ref(), &mapped);
+    let mapped = Mapped::of_pids(pids);
+    let (mut packages, warnings, restart) = os_packages(&rootfs, os.as_ref(), &mapped);
 
     let exes: Vec<String> = pids
         .iter()
@@ -85,8 +157,10 @@ pub fn scan_lxc(guest: &Guest, pids: &[u32], limits: &LangLimits) -> Inventory {
         os,
         guest: Some(guest.clone()),
         packages,
-        mapped_files: mapped.len(),
+        mapped_files: mapped.files.len(),
         warnings,
+        restart,
+        reboot: reboot_required(&rootfs),
     }
 }
 
@@ -96,7 +170,7 @@ awk '{ p = $0; if (sub(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +/, "", p) && p ~ /^\
 
 /// The package databases, os-release and the usrmerge links, as a tar.gz on stdout.
 const DB_SCRIPT: &str = r#"cd / || exit 1; set --
-for f in etc/os-release usr/lib/os-release var/lib/dpkg/status lib/apk/db/installed var/lib/rpm/rpmdb.sqlite var/lib/dpkg/info/*.list; do
+for f in etc/os-release usr/lib/os-release run/reboot-required run/reboot-required.pkgs var/lib/dpkg/status lib/apk/db/installed var/lib/rpm/rpmdb.sqlite var/lib/dpkg/info/*.list; do
   [ -f "$f" ] && set -- "$@" "$f"
 done
 for f in bin sbin lib lib32 lib64 libx32 etc/os-release; do [ -L "$f" ] && set -- "$@" "$f"; done
@@ -135,29 +209,49 @@ pub fn scan_vm(guest: &Guest, running: bool, exec: bool) -> Inventory {
         return empty(guest, os, "Windows guest: packages not inspected".into());
     }
     match fetch_vm(&mut agent, os.as_ref()) {
-        Ok((packages, mapped_files, warnings, os_file)) => Inventory {
+        Ok(f) => Inventory {
             name: guest.name.clone(),
             digest: None,
-            os: os_file.or(os),
+            os: f.os.or(os),
             guest: Some(guest.clone()),
-            packages,
-            mapped_files,
-            warnings,
+            packages: f.packages,
+            mapped_files: f.mapped_files,
+            warnings: f.warnings,
+            restart: f.restart,
+            reboot: f.reboot,
         },
         Err(e) => empty(guest, os, format!("guest inspection failed: {e:#}")),
     }
 }
 
-type Fetched = (Vec<Package>, usize, Vec<String>, Option<OsRelease>);
+struct Fetched {
+    packages: Vec<Package>,
+    mapped_files: usize,
+    warnings: Vec<String>,
+    os: Option<OsRelease>,
+    restart: Vec<Restart>,
+    reboot: Option<String>,
+}
 
 fn fetch_vm(agent: &mut Agent, os: Option<&OsRelease>) -> anyhow::Result<Fetched> {
     let timeout = Duration::from_secs(120);
     let maps = agent.exec_sh(MAPS_SCRIPT, timeout)?;
-    let mapped: BTreeSet<String> = String::from_utf8_lossy(&maps.stdout)
-        .lines()
-        .map(|l| l.trim_end_matches(" (deleted)").to_string())
-        .filter(|l| l.starts_with('/'))
-        .collect();
+    let lines = String::from_utf8_lossy(&maps.stdout);
+    let lines = lines.lines().filter(|l| l.starts_with('/'));
+    let mapped = Mapped {
+        files: lines
+            .clone()
+            .map(|l| l.trim_end_matches(" (deleted)").to_string())
+            .collect(),
+        // The script doesn't say which process: the packages only.
+        deleted: vec![(
+            String::new(),
+            lines
+                .filter_map(|l| l.strip_suffix(" (deleted)"))
+                .map(str::to_string)
+                .collect(),
+        )],
+    };
     let db = agent.exec_sh(DB_SCRIPT, timeout)?;
     if db.code != 0 && db.stdout.is_empty() {
         anyhow::bail!(
@@ -171,19 +265,27 @@ fn fetch_vm(agent: &mut Agent, os: Option<&OsRelease>) -> anyhow::Result<Fetched
     let result = (|| {
         qga::unpack(dir.path(), &db.stdout)?;
         // The canonical dirs of mapped files, so the usrmerge links resolve (`/lib/x` → `/usr/lib/x`).
-        for f in &mapped {
+        for f in &mapped.files {
             if let Some(parent) = Path::new(f).parent() {
                 let _ = qga::safe_dirs(dir.path(), parent);
             }
         }
         let rootfs = Rootfs::new(dir.path());
         let os_file = OsRelease::read(&rootfs);
-        let (packages, mut warnings) = os_packages(&rootfs, os_file.as_ref().or(os), &mapped);
+        let (packages, mut warnings, restart) =
+            os_packages(&rootfs, os_file.as_ref().or(os), &mapped);
         if maps.truncated || db.truncated {
             warnings.push("guest agent output truncated: inventory incomplete".into());
         }
         warnings.push("language dependencies not inspected in VMs".into());
-        Ok((packages, mapped.len(), warnings, os_file))
+        Ok(Fetched {
+            packages,
+            mapped_files: mapped.files.len(),
+            warnings,
+            reboot: reboot_required(&rootfs),
+            os: os_file,
+            restart,
+        })
     })();
     let _ = std::fs::remove_dir_all(dir.path());
     result
@@ -226,11 +328,8 @@ fn upstream_version(v: &str) -> &str {
 pub fn host_inventory(host_pids: &[u32], match_kernel: bool) -> Inventory {
     let rootfs = Rootfs::new("/");
     let os = OsRelease::read(&rootfs);
-    let mapped: BTreeSet<String> = host_pids
-        .iter()
-        .flat_map(|&p| procfs::mapped_files(p))
-        .collect();
-    let (mut packages, warnings) = os_packages(&rootfs, os.as_ref(), &mapped);
+    let mapped = Mapped::of_pids(host_pids);
+    let (mut packages, warnings, restart) = os_packages(&rootfs, os.as_ref(), &mapped);
 
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     let kernel_file = format!("/boot/vmlinuz-{}", release.trim());
@@ -259,9 +358,33 @@ pub fn host_inventory(host_pids: &[u32], match_kernel: bool) -> Inventory {
         os,
         guest: None,
         packages,
-        mapped_files: mapped.len(),
+        mapped_files: mapped.files.len(),
         warnings,
+        restart,
+        reboot: reboot_required(&rootfs).or_else(|| newer_kernel(release.trim())),
     }
+}
+
+/// A kernel newer than the running one is installed (`/boot/vmlinuz-*`), and
+/// the running one is not pinned (`proxmox-boot-tool kernel pin`).
+fn newer_kernel(running: &str) -> Option<String> {
+    let pin = std::fs::read_to_string("/etc/kernel/proxmox-boot-pin").unwrap_or_default();
+    if pin.trim() == running {
+        return None;
+    }
+    let installed = std::fs::read_dir("/boot").ok()?.flatten().filter_map(|e| {
+        e.file_name()
+            .to_str()?
+            .strip_prefix("vmlinuz-")
+            .map(str::to_string)
+    });
+    newest_kernel(running, installed)
+}
+
+fn newest_kernel(running: &str, installed: impl Iterator<Item = String>) -> Option<String> {
+    let newest = installed.max_by(|a, b| crate::vuln::version_cmp(a, b))?;
+    (crate::vuln::version_cmp(&newest, running).is_gt())
+        .then(|| format!("kernel {newest} installed, {running} running"))
 }
 
 /// What to inventory on this node.
@@ -333,5 +456,26 @@ mod tests {
         assert_eq!(upstream_version("1:6.0.5-1"), "6.0.5");
         assert_eq!(upstream_version("6.17.2-1-pve"), "6.17.2");
         assert_eq!(upstream_version("9.2.2"), "9.2.2");
+    }
+
+    #[test]
+    fn newer_kernels() {
+        let k = |v: &[&str]| {
+            v.iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        assert_eq!(
+            newest_kernel(
+                "7.0.2-6-pve",
+                k(&["7.0.2-6-pve", "7.0.2-10-pve", "6.17.2-1-pve"])
+            ),
+            Some("kernel 7.0.2-10-pve installed, 7.0.2-6-pve running".into())
+        );
+        assert_eq!(
+            newest_kernel("7.0.2-6-pve", k(&["7.0.2-6-pve", "6.8.12-4-pve"])),
+            None
+        );
     }
 }

@@ -787,7 +787,7 @@ mod tests {
                 Package::new("noeco", "1", PackageKind::Os, "pkg:x/noeco@1".into()),
             ],
             mapped_files: 0,
-            warnings: vec![],
+            ..Default::default()
         }
     }
 

@@ -36,6 +36,29 @@ The pretty output lists at most 12 loaded packages per guest; `-o json` has
 them all. Stopped guests and templates take one line: their
 [risks](Guest-Risks) are read from the config, nothing else is inspected.
 
+## Restart and reboot needed
+
+An upgrade replaces a library on disk, but a process that mapped the old one
+keeps running it: the kernel shows the old file as `(deleted)` in
+`/proc/<pid>/maps`. virtsec reports, per guest and for the node, each package
+whose replaced files are still mapped, and by which processes. Matching uses
+the **installed** version, so a CVE fixed on disk but still running only shows
+here.
+
+```text
+vs-deb12  Debian GNU/Linux 12 (bookworm)
+  lxc 4001 running
+  packages: 268 OS (48 loaded, 220 dormant), 0 language deps · 63 mapped files
+  ! restart needed, old code still running: libssl3 (nginx[14823] nginx[14824] sshd[14811] systemd-journal[14690] +1)
+```
+
+(After `apt-get install --reinstall libssl3` in the container, nginx running.)
+In VMs the packages are named, not the processes. A **reboot** is flagged when
+the guest or the node has `/run/reboot-required` (Debian, Ubuntu), and on the
+node when a kernel newer than the running one is in `/boot` and the running one
+is not pinned (`proxmox-boot-tool kernel pin`). JSON: `restart: [{package,
+processes}]`, `reboot`.
+
 ## Per guest type
 
 ### LXC

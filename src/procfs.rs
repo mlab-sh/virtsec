@@ -19,11 +19,34 @@ pub fn check_root_access() -> Result<()> {
     }
 }
 
-/// The files mapped by `pid` (binary, shared libraries, ...), as in-container paths.
-pub fn mapped_files(pid: u32) -> BTreeSet<String> {
+/// The files mapped by `pid` (binary, shared libraries, ...), as in-container
+/// paths, and those of them replaced on disk since (see [`parse_deleted`]).
+pub fn mapped_files(pid: u32) -> (BTreeSet<String>, BTreeSet<String>) {
     fs::read_to_string(format!("/proc/{pid}/maps"))
-        .map(|s| parse_maps(&s))
+        .map(|s| (parse_maps(&s), parse_deleted(&s)))
         .unwrap_or_default()
+}
+
+/// The mapped files the kernel marks ` (deleted)`: an upgrade replaced them,
+/// the process still runs the old code until it restarts.
+pub fn parse_deleted(content: &str) -> BTreeSet<String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            line.splitn(6, ' ')
+                .nth(5)?
+                .trim_start()
+                .strip_suffix(" (deleted)")
+        })
+        .filter(|p| p.starts_with('/'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `comm[pid]`, how a process is named in restart notices.
+pub fn label(pid: u32) -> String {
+    let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+    format!("{}[{pid}]", comm.trim())
 }
 
 /// Parse `/proc/<pid>/maps`: the 6th column, file-backed entries only.
@@ -66,6 +89,10 @@ mod tests {
                 "/usr/lib/x86_64-linux-gnu/libc.so.6",
                 "/usr/sbin/nginx",
             ]
+        );
+        assert_eq!(
+            parse_deleted(maps).into_iter().collect::<Vec<_>>(),
+            vec!["/usr/lib/libssl.so.3"]
         );
     }
 }
