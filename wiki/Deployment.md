@@ -58,11 +58,28 @@ inventory, vulnerabilities, the live stream, and the config.
    The `sha256` pins the binary: after a virtsec upgrade, update it
    (`mlab-agent tools hash /usr/bin/virtsec`) and restart the agent.
 
-4. **Run** the agent as root (`mlab-agent run`, or its service), then check:
+4. **Run the agent as root.** The `mlab-agent` package's unit runs the agent
+   as the `mlab-agent` user with no capability and no netlink: virtsec would
+   refuse to start (it reads guests' roots, `/etc/pve`, the guest agent
+   sockets and the journal, and loads its eBPF probe). On a PVE node, add this
+   drop-in, which keeps the rest of the unit's sandbox:
 
    ```bash
-   sudo mlab-agent tools check
+   sudo mkdir -p /etc/systemd/system/mlab-agent.service.d
+   sudo tee /etc/systemd/system/mlab-agent.service.d/virtsec.conf >/dev/null <<'EOF'
+   [Service]
+   User=root
+   Group=root
+   CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_SYS_PTRACE CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE CAP_NET_ADMIN
+   RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+   EOF
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now mlab-agent
+   sudo mlab-agent tools check     # virtsec  0.1.0  Running
    ```
+
+   Enrol as root too (step 2): the agent's key is then root's, readable by
+   the agent running as root.
 
 The node appears in the workspace's Virtualization tab once its first
 `status` reaches mlab.
