@@ -54,7 +54,7 @@ enum Command {
     },
     /// Vulnerabilities of every guest and of the node (vuln.mlab.sh).
     Vulns(VulnsArgs),
-    /// Live stream: execs in guests, PVE logins and tasks, guest config changes.
+    /// Live stream: guest execs (and with eBPF connects, file writes), PVE logins and tasks, guest config changes.
     Watch(WatchArgs),
 }
 
