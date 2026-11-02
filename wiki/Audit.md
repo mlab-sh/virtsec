@@ -5,8 +5,8 @@ virtsec audit [--vmid ID]... [--kind lxc|vm] [--no-host] [--guest-exec]
               [--fail-on info|warning|critical] [-o pretty|json]
 ```
 
-The security posture of the node and its guests, read from their
-configuration: what an admin set, or forgot to set. CVEs are
+The security posture of the node and its guests (backups included), read
+from their configuration: what an admin set, or forgot to set. CVEs are
 [`vulns`](Vulns)' job. Needs root; changes nothing.
 
 ```text
@@ -50,6 +50,11 @@ fails (for a cron or CI); errors exit 1.
 | `apt.enterprise_unreachable` | warning | APT sources, `/var/lib/apt/lists` | An `enterprise.proxmox.com` repo is enabled but its index was never fetched: without a subscription `apt update` fails on it, and PVE (or Ceph) updates silently stop. |
 | `apt.stale` | warning | `/var/lib/apt/lists/*Release` | Newest list older than 7 days. |
 | `corosync.unencrypted` | warning | `/etc/pve/corosync.conf` | `crypto_cipher: none` or `secauth: off`. |
+| `backup.no_job` | warning | `/etc/pve/jobs.cfg`, `vzdump.cron` | No enabled vzdump job runs on this node. |
+| `backup.missing` | warning | jobs, pools (`user.cfg`) | A guest (templates aside) no job covers: not in `vmid`, its `pool`, nor `all` minus `exclude`. |
+| `backup.stale` | warning | the storage's `dump/` dir | Its newest `vzdump-*-<vmid>-*` is older than 7 days, or there is none. Dir-backed storages only: PBS contents are not read. |
+| `backup.unencrypted` | info | `storage.cfg`, `priv/storage/<name>.enc` | A job writes to a PBS storage without a client-side encryption key (only the key file's presence is checked). |
+| `backup.on_node` | info | `storage.cfg` | A job writes to a storage that is neither shared nor network / PBS: the backups die with the node (or with a ransomware on it). |
 | `restart_needed` | warning | inventory | [Old code still mapped](Inventory#restart-and-reboot-needed) after an upgrade. |
 | `reboot_needed` | warning | inventory | `/run/reboot-required`, or a newer kernel than the running one. |
 | `guest.risk` | see below | guest config | Each [isolation risk](Guest-Risks). |

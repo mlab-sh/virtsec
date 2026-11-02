@@ -5,6 +5,8 @@
 //! - **node**: PVE firewall, second factors, API tokens, SSH, the web UI's
 //!   listen policy, APT repositories and how fresh their lists are, corosync.
 //! - **guests**: isolation risks from their config, guest firewall coverage.
+//! - **backups**: guests no vzdump job covers, stale or missing dumps,
+//!   unencrypted PBS targets, backups kept on the node's own disks.
 //! - **both**: restart and reboot needed (from the inventory).
 //!
 //! Secrets are never read into a check: `tfa.cfg` is only asked which users
@@ -84,6 +86,7 @@ pub fn audit(p: &Paths, invs: &[Inventory]) -> Vec<Check> {
     out.extend(web_ui(p.root));
     out.extend(repositories(p.root, SystemTime::now()));
     out.extend(corosync(p.pve));
+    out.extend(backups(p.pve, node.trim(), &guests, SystemTime::now()));
     for inv in invs {
         out.extend(notices(inv));
     }
@@ -545,6 +548,281 @@ fn corosync(pve: &Path) -> Vec<Check> {
     )]
 }
 
+// ---------------------------------------------------------------- backups
+
+/// A dump older than this is a backup that stopped running.
+const BACKUP_STALE: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// One vzdump job (`jobs.cfg` section, or a legacy `vzdump.cron` line).
+#[derive(Debug, Default, PartialEq)]
+struct Job {
+    all: bool,
+    vmids: Vec<u32>,
+    exclude: Vec<u32>,
+    pool: Option<String>,
+    node: Option<String>,
+    storage: Option<String>,
+    enabled: bool,
+}
+
+impl Job {
+    fn set(&mut self, key: &str, value: &str) {
+        let ids = |v: &str| {
+            v.split([',', ' '])
+                .filter_map(|i| i.trim().parse().ok())
+                .collect()
+        };
+        match key {
+            "all" => self.all = value == "1",
+            "vmid" => self.vmids = ids(value),
+            "exclude" => self.exclude = ids(value),
+            "pool" => self.pool = Some(value.to_string()),
+            "node" => self.node = Some(value.to_string()),
+            "storage" => self.storage = Some(value.to_string()),
+            "enabled" => self.enabled = value != "0",
+            _ => {}
+        }
+    }
+
+    fn covers(&self, vmid: u32, node: &str, pools: &HashMap<String, Vec<u32>>) -> bool {
+        self.enabled
+            && self.node.as_deref().is_none_or(|n| n == node)
+            && !self.exclude.contains(&vmid)
+            && (self.all
+                || self.vmids.contains(&vmid)
+                || self
+                    .pool
+                    .as_ref()
+                    .and_then(|p| pools.get(p))
+                    .is_some_and(|v| v.contains(&vmid)))
+    }
+}
+
+/// `jobs.cfg`: `vzdump: <id>` sections of tab-indented `key value` lines.
+fn parse_jobs(content: &str) -> Vec<Job> {
+    let mut out: Vec<Job> = Vec::new();
+    let mut current: Option<Job> = None;
+    for line in content.lines() {
+        if !line.starts_with([' ', '\t']) {
+            out.extend(current.take());
+            if line.starts_with("vzdump:") {
+                current = Some(Job {
+                    enabled: true,
+                    ..Default::default()
+                });
+            }
+        } else if let Some(job) = current.as_mut() {
+            if let Some((k, v)) = line.trim().split_once(char::is_whitespace) {
+                job.set(k, v.trim());
+            }
+        }
+    }
+    out.extend(current);
+    out
+}
+
+/// Legacy `vzdump.cron`: `<cron> root vzdump 100 101 --mode snapshot --storage x`.
+fn parse_cron(content: &str) -> Vec<Job> {
+    content
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter_map(|l| l.split_once(" vzdump "))
+        .map(|(_, args)| {
+            let mut job = Job {
+                enabled: true,
+                ..Default::default()
+            };
+            let mut w = args.split_whitespace().peekable();
+            while let Some(a) = w.next() {
+                if let Some(k) = a.strip_prefix("--") {
+                    let v = w.next_if(|v| !v.starts_with("--")).unwrap_or("1");
+                    job.set(k, v);
+                } else if let Ok(id) = a.parse() {
+                    job.vmids.push(id);
+                }
+            }
+            job
+        })
+        .collect()
+}
+
+/// `pool:<name>:<comment>:<vmids>:` lines of `user.cfg`.
+fn parse_pools(user_cfg: &str) -> HashMap<String, Vec<u32>> {
+    user_cfg
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            (f.first() == Some(&"pool")).then(|| {
+                let ids = f
+                    .get(3)
+                    .unwrap_or(&"")
+                    .split(',')
+                    .filter_map(|i| i.parse().ok());
+                (f.get(1).unwrap_or(&"").to_string(), ids.collect())
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct Storage {
+    kind: String,
+    path: Option<String>,
+    shared: bool,
+}
+
+/// `storage.cfg`: `<type>: <name>` then tab-indented `key value` lines.
+fn parse_storages(content: &str) -> HashMap<String, Storage> {
+    let mut out = HashMap::new();
+    let mut current: Option<String> = None;
+    for line in content.lines() {
+        if !line.starts_with([' ', '\t']) {
+            current = line.split_once(':').map(|(kind, name)| {
+                let name = name.trim().to_string();
+                out.insert(
+                    name.clone(),
+                    Storage {
+                        kind: kind.trim().to_string(),
+                        ..Default::default()
+                    },
+                );
+                name
+            });
+        } else if let Some(st) = current.as_ref().and_then(|n| out.get_mut(n)) {
+            match line.trim().split_once(char::is_whitespace) {
+                Some(("path", v)) => st.path = Some(v.trim().to_string()),
+                Some(("shared", v)) => st.shared = v.trim() == "1",
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Newest `vzdump-<lxc|qemu>-<vmid>-*` per vmid in a storage's `dump/` dir.
+fn newest_dumps(dir: &Path) -> HashMap<u32, SystemTime> {
+    let mut out: HashMap<u32, SystemTime> = HashMap::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(vmid) = name
+            .strip_prefix("vzdump-")
+            .and_then(|r| r.split('-').nth(1))
+            .and_then(|v| v.parse().ok())
+        else {
+            continue;
+        };
+        if name.ends_with(".log") || name.ends_with(".notes") {
+            continue;
+        }
+        if let Ok(t) = e.metadata().and_then(|m| m.modified()) {
+            let newest = out.entry(vmid).or_insert(t);
+            *newest = (*newest).max(t);
+        }
+    }
+    out
+}
+
+/// Storages a backup lives on and survives with the node: network and PBS.
+const OFF_NODE: &[&str] = &["pbs", "nfs", "cifs", "cephfs", "glusterfs"];
+
+fn backups(pve: &Path, node: &str, guests: &[&Guest], now: SystemTime) -> Vec<Check> {
+    let mut jobs = read(&pve.join("jobs.cfg"))
+        .map(|c| parse_jobs(&c))
+        .unwrap_or_default();
+    jobs.extend(
+        read(&pve.join("vzdump.cron"))
+            .map(|c| parse_cron(&c))
+            .unwrap_or_default(),
+    );
+    let pools = read(&pve.join("user.cfg"))
+        .map(|c| parse_pools(&c))
+        .unwrap_or_default();
+    let storages = read(&pve.join("storage.cfg"))
+        .map(|c| parse_storages(&c))
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    let jobs: Vec<&Job> = jobs
+        .iter()
+        .filter(|j| j.enabled && j.node.as_deref().is_none_or(|n| n == node))
+        .collect();
+    if jobs.is_empty() {
+        out.push(Check::node(
+            "backup.no_job",
+            Severity::Warning,
+            "no backup job runs on this node: no guest is backed up".into(),
+            Some("Datacenter → Backup → Add (to a PBS or a network storage)"),
+        ));
+        return out;
+    }
+
+    let used: BTreeSet<&str> = jobs.iter().filter_map(|j| j.storage.as_deref()).collect();
+    for name in &used {
+        let Some(st) = storages.get(*name) else {
+            continue;
+        };
+        if st.kind == "pbs" && !pve.join(format!("priv/storage/{name}.enc")).exists() {
+            out.push(Check::node(
+                "backup.unencrypted",
+                Severity::Info,
+                format!("backups to PBS storage {name} are not encrypted client-side"),
+                Some("Datacenter → Storage → edit → Encryption: upload or generate a key (keep a copy off the node)"),
+            ));
+        }
+        if !st.shared && !OFF_NODE.contains(&st.kind.as_str()) {
+            out.push(Check::node(
+                "backup.on_node",
+                Severity::Info,
+                format!("backups to storage {name} stay on the node's own disks: lost with it"),
+                Some("back up to a PBS or a network storage, or sync the dumps elsewhere"),
+            ));
+        }
+    }
+    let dumps: HashMap<&str, HashMap<u32, SystemTime>> = used
+        .iter()
+        .filter_map(|n| {
+            let st = storages.get(*n)?;
+            let path = st.path.as_ref()?;
+            Some((*n, newest_dumps(&Path::new(path).join("dump"))))
+        })
+        .collect();
+
+    for g in guests.iter().filter(|g| g.status != "template") {
+        let covering: Vec<&&Job> = jobs
+            .iter()
+            .filter(|j| j.covers(g.vmid, node, &pools))
+            .collect();
+        if covering.is_empty() {
+            out.push(Check::guest(
+                g,
+                "backup.missing",
+                Severity::Warning,
+                "no backup job covers this guest".into(),
+            ));
+            continue;
+        }
+        // Only storages whose dumps virtsec can list (dir-backed): PBS is not read.
+        let seen: Vec<Option<SystemTime>> = covering
+            .iter()
+            .filter_map(|j| dumps.get(j.storage.as_deref()?))
+            .map(|d| d.get(&g.vmid).copied())
+            .collect();
+        if seen.is_empty() {
+            continue;
+        }
+        let msg = match seen.iter().flatten().max() {
+            None => "no backup file found on its backup storage".to_string(),
+            Some(t) => match now.duration_since(*t) {
+                Ok(age) if age > BACKUP_STALE => {
+                    format!("last backup {} days ago", age.as_secs() / 86400)
+                }
+                _ => continue,
+            },
+        };
+        out.push(Check::guest(g, "backup.stale", Severity::Warning, msg));
+    }
+    out
+}
+
 // ---------------------------------------------------------------- guests
 
 fn notices(inv: &Inventory) -> Vec<Check> {
@@ -809,6 +1087,65 @@ mod tests {
         )
         .unwrap();
         assert!(ids(SystemTime::now()).is_empty());
+    }
+
+    #[test]
+    fn backup_coverage() {
+        let jobs = parse_jobs(
+            "vzdump: backup-a\n\tschedule sun 01:00\n\tall 1\n\texclude 3\n\tstorage dumps\n\n\
+             vzdump: backup-b\n\tvmid 3\n\tenabled 0\n\n\
+             realm-sync: x\n\tschedule daily\n\n\
+             vzdump: backup-c\n\tpool lab\n\tnode other\n",
+        );
+        assert_eq!(jobs.len(), 3);
+        assert!(jobs[0].all && jobs[0].exclude == [3] && jobs[0].enabled);
+        assert!(!jobs[1].enabled);
+        let cron = parse_cron("# x\nPATH=/bin\n0 1 * * 6 root vzdump 100 101 --mode snapshot --storage local --quiet 1\n");
+        assert_eq!(cron[0].vmids, [100, 101]);
+        assert_eq!(cron[0].storage.as_deref(), Some("local"));
+        let pools = parse_pools("pool:lab::1,2::\nuser:root@pam:1:0::::::\n");
+        assert_eq!(pools["lab"], [1, 2]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let pve = dir.path().join("pve");
+        let dumps = dir.path().join("store");
+        std::fs::create_dir_all(dumps.join("dump")).unwrap();
+        std::fs::create_dir_all(&pve).unwrap();
+        let g1 = guest(1, "unprivileged: 1\n");
+        let g3 = guest(3, "unprivileged: 1\n");
+        let ids = |c: &[Check]| {
+            c.iter()
+                .map(|c| (c.id, c.guest.as_ref().map(|g| g.vmid)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&backups(&pve, "pve", &[&g1], SystemTime::now())),
+            [("backup.no_job", None)]
+        );
+
+        std::fs::write(
+            pve.join("jobs.cfg"),
+            "vzdump: a\n\tall 1\n\texclude 3\n\tstorage dumps\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pve.join("storage.cfg"),
+            format!("dir: dumps\n\tpath {}\n\tcontent backup\n", dumps.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            dumps.join("dump/vzdump-lxc-1-2026_10_01-01_00_00.tar.zst"),
+            "",
+        )
+        .unwrap();
+        let now = SystemTime::now();
+        assert_eq!(
+            ids(&backups(&pve, "pve", &[&g1, &g3], now)),
+            [("backup.on_node", None), ("backup.missing", Some(3))]
+        );
+        let later = now + Duration::from_secs(10 * 86400);
+        let c = backups(&pve, "pve", &[&g1], later);
+        assert_eq!(c[1].message, "last backup 10 days ago");
     }
 
     #[test]
